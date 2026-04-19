@@ -1,0 +1,56 @@
+name: YouTube Search
+
+on:
+  workflow_dispatch:
+    inputs:
+      search_query:
+        description: 'What to search for on YouTube'
+        required: true
+        type: string
+      max_results:
+        description: 'Number of results (max 10)'
+        required: false
+        default: '5'
+        type: string
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install yt-dlp
+        run: |
+          pip install yt-dlp
+
+      - name: Search YouTube and extract info
+        run: |
+          MAX=${{ inputs.max_results }}
+          QUERY="${{ inputs.search_query }}"
+          # Use yt-dlp to search and get title + URL
+          yt-dlp "ytsearch${MAX}:${QUERY}" \
+            --get-title \
+            --get-url \
+            --flat-playlist \
+            --no-warnings \
+            > results.txt
+          
+          # Format as "Title | URL" and add numbering
+          echo "YouTube Search Results for: $QUERY" > formatted.txt
+          echo "================================" >> formatted.txt
+          echo "" >> formatted.txt
+          
+          line=1
+          while IFS= read -r title && IFS= read -r url; do
+            echo "$line. $title" >> formatted.txt
+            echo "   $url" >> formatted.txt
+            echo "" >> formatted.txt
+            line=$((line+1))
+          done < results.txt
+          
+          mv formatted.txt search_results.txt
+
+      - name: Upload search results as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-search-results
+          path: search_results.txt
+          retention-days: 7
