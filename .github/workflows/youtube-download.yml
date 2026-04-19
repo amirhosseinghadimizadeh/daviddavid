@@ -1,0 +1,47 @@
+name: YouTube Downloader (Fixed)
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'YouTube URL'
+        required: true
+        type: string
+      format:
+        description: 'Format: video (best) or audio (mp3)'
+        required: true
+        default: 'video'
+        type: choice
+        options:
+          - video
+          - audio
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup yt-dlp
+        uses: AnimMouse/setup-yt-dlp@v3
+        with:
+          ffmpeg: true
+          aria2: true
+          ejs-node: true
+
+      - name: Download YouTube Video
+        if: inputs.format == 'video'
+        run: |
+          yt-dlp --force-ipv4 -f "bestvideo+bestaudio/best" -o "%(title)s.%(ext)s" "${{ inputs.video_url }}"
+          echo "OUT_FILE=$(ls *.mp4 *.webm *.mkv 2>/dev/null | head -1)" >> $GITHUB_ENV
+
+      - name: Download YouTube Audio
+        if: inputs.format == 'audio'
+        run: |
+          yt-dlp --force-ipv4 -f "bestaudio" --extract-audio --audio-format mp3 -o "%(title)s.%(ext)s" "${{ inputs.video_url }}"
+          echo "OUT_FILE=$(ls *.mp3 2>/dev/null | head -1)" >> $GITHUB_ENV
+
+      - name: Upload as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-download
+          path: ${{ env.OUT_FILE }}
+          retention-days: 90
