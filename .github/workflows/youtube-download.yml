@@ -1,14 +1,14 @@
-name: YouTube Downloader
+name: YouTube Downloader (with Impersonate)
 
 on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: 'YouTube URL (e.g., https://youtu.be/... or https://www.youtube.com/watch?v=...)'
+        description: 'YouTube URL'
         required: true
         type: string
       format:
-        description: 'Format: video (best) or audio (mp3)'
+        description: 'video or audio'
         required: true
         default: 'video'
         type: choice
@@ -16,7 +16,7 @@ on:
           - video
           - audio
       filename:
-        description: 'Output filename (without extension, optional)'
+        description: 'Output name (optional, no extension)'
         required: false
         type: string
 
@@ -24,41 +24,58 @@ jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      - name: Install yt-dlp
-        run: pip install yt-dlp
+      - name: Install Node.js (required for JS runtime)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install yt-dlp with curl_cffi (for impersonation)
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install yt-dlp curl_cffi
 
       - name: Set filename
         run: |
           if [ -z "${{ inputs.filename }}" ]; then
-            # Use video title as filename (safe characters only)
             FILENAME="youtube_video"
           else
             FILENAME="${{ inputs.filename }}"
           fi
           echo "FILENAME=$FILENAME" >> $GITHUB_ENV
 
-      - name: Download YouTube video
+      - name: Download video
         if: inputs.format == 'video'
         run: |
-          yt-dlp -f best \
+          yt-dlp --impersonate chrome \
+            --js-runtimes node \
+            -f best \
             -o "${{ env.FILENAME }}.%(ext)s" \
             "${{ inputs.video_url }}"
-          # Find the actual output file (extension unknown)
           ACTUAL_FILE=$(ls "${{ env.FILENAME }}".* 2>/dev/null | head -1)
+          if [ -z "$ACTUAL_FILE" ]; then
+            echo "ERROR: No file downloaded"
+            exit 1
+          fi
           echo "ACTUAL_FILE=$ACTUAL_FILE" >> $GITHUB_ENV
 
-      - name: Download YouTube audio as MP3
+      - name: Download audio
         if: inputs.format == 'audio'
         run: |
-          yt-dlp -f bestaudio \
+          yt-dlp --impersonate chrome \
+            --js-runtimes node \
+            -f bestaudio \
             --extract-audio \
             --audio-format mp3 \
             -o "${{ env.FILENAME }}.%(ext)s" \
             "${{ inputs.video_url }}"
           ACTUAL_FILE=$(ls "${{ env.FILENAME }}".* 2>/dev/null | head -1)
+          if [ -z "$ACTUAL_FILE" ]; then
+            echo "ERROR: No audio file downloaded"
+            exit 1
+          fi
           echo "ACTUAL_FILE=$ACTUAL_FILE" >> $GITHUB_ENV
 
-      - name: Upload as artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: youtube-download
