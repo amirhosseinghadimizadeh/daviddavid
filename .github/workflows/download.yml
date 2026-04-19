@@ -1,0 +1,40 @@
+name: Download and save as artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      download_url:
+        description: 'Direct download URL'
+        required: true
+        type: string
+      filename:
+        description: 'Name to save the file as (optional)'
+        required: false
+        type: string
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set filename
+        run: |
+          if [ -z "${{ inputs.filename }}" ]; then
+            # Try to guess filename from URL
+            FILENAME=$(basename "${{ inputs.download_url }}" | cut -d'?' -f1)
+            if [ -z "$FILENAME" ]; then
+              FILENAME="downloaded_file"
+            fi
+          else
+            FILENAME="${{ inputs.filename }}"
+          fi
+          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
+
+      - name: Download the file
+        run: curl -L -o "${{ env.FILENAME }}" "${{ inputs.download_url }}"
+
+      - name: Upload as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloaded-file
+          path: ${{ env.FILENAME }}
+          retention-days: 90   # file stays on GitHub for 90 days
