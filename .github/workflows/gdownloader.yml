@@ -1,14 +1,14 @@
-name: Download Full Website (Debug)
+name: Download Full Website with All Media
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'Website URL (must start with https://)'
+        description: 'Full website URL (e.g., https://www.bbc.com)'
         required: true
         type: string
       depth:
-        description: 'Maximum link depth (1-3)'
+        description: 'Link depth (2-3) – higher = more pages, larger download'
         required: false
         default: '2'
         type: string
@@ -17,21 +17,17 @@ jobs:
   mirror:
     runs-on: ubuntu-latest
     steps:
-      - name: Install wget
-        run: sudo apt-get update && sudo apt-get install -y wget
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y wget jq
 
-      - name: Create output directory
-        run: mkdir -p website_mirror
-
-      - name: Download website with wget (verbose)
+      - name: Download with wget (aggressive)
         run: |
-          cd website_mirror
+          mkdir -p site
+          cd site
           URL="${{ inputs.url }}"
           DEPTH="${{ inputs.depth }}"
           DOMAIN=$(echo "$URL" | awk -F/ '{print $3}')
-          
-          echo "=== Starting download of $URL (depth $DEPTH) ==="
-          
+
           wget \
             --recursive \
             --level=$DEPTH \
@@ -41,44 +37,57 @@ jobs:
             --convert-links \
             --restrict-file-names=windows \
             --domains=$DOMAIN \
+            --span-hosts \
             --no-parent \
-            --wait=1 \
+            --wait=0.5 \
             --random-wait \
-            --limit-rate=500k \
-            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            --verbose \
-            --debug \
-            --output-file=wget.log \
+            --limit-rate=1M \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0" \
+            --header="Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" \
+            --header="Accept-Language: en-US,en;q=0.5" \
+            --header="Accept-Encoding: gzip, deflate, br" \
+            --header="Connection: keep-alive" \
+            --header="Upgrade-Insecure-Requests: 1" \
+            --timeout=30 \
+            --tries=3 \
             "$URL"
-          
-          echo "=== Download finished ==="
-          echo "Files in current directory:"
-          ls -la
-          echo "=== wget.log last 50 lines ==="
-          tail -50 wget.log
 
-      - name: Check if any files were downloaded
+      - name: Extract and download all media from HTML files (catch anything wget missed)
         run: |
-          cd website_mirror
-          FILE_COUNT=$(find . -type f | wc -l)
-          echo "Total files downloaded: $FILE_COUNT"
-          if [ $FILE_COUNT -eq 0 ]; then
-            echo "ERROR: No files were downloaded. Check the URL and network."
-            echo "wget.log content:"
-            cat wget.log
-            exit 1
-          fi
+          cd site
+          # Find all HTML files
+          find . -name "*.html" -o -name "*.htm" | while read html; do
+            # Extract all image, video, audio, source, and srcset URLs
+            grep -Eo '(https?://[^"'\''<> ]+\.(jpg|jpeg|png|gif|webp|svg|mp4|webm|ogg|mp3|wav|css|js|woff2|woff|ttf))' "$html" 2>/dev/null | sort -u | while read media_url; do
+              # Skip if already downloaded (file exists)
+              filename=$(basename "$media_url" | cut -d'?' -f1)
+              if [ ! -f "$filename" ]; then
+                echo "Downloading missing media: $media_url"
+                curl -s -L -A "Mozilla/5.0" -o "$filename" "$media_url" || true
+              fi
+            done
+          done
 
-      - name: Compress (only if files exist)
-        if: success()
-        run: zip -r website_mirror.zip website_mirror/
+      - name: Fix duplicate file/directory names (e.g., /video/docs vs /video/docs.html)
+        run: |
+          cd site
+          # Find files whose name matches a directory name in the same parent
+          find . -type f | while read file; do
+            dir=$(dirname "$file")
+            base=$(basename "$file")
+            # Remove extension for comparison
+            base_noext="${base%.*}"
+            if [ -d "$dir/$base_noext" ]; then
+              mv "$file" "$dir/${base_noext}_file.html" 2>/dev/null || true
+            fi
+          done
+
+      - name: Compress into ZIP
+        run: zip -r full_site.zip site/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: website-mirror
-          path: |
-            website_mirror.zip
-            website_mirror/wget.log
+          name: full-website-with-media
+          path: full_site.zip
           retention-days: 7
