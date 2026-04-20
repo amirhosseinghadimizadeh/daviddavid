@@ -1,4 +1,9 @@
-- name: Show free space
-  run: |
-    echo "=== Disk usage ==="
-    df -h / | awk 'NR==2 {print "Free: " $4 " out of " $2 " total (" $5 " used)"}'
+      - name: Save disk info to file
+        run: df -h / > disk_space.txt
+
+      - name: Upload log
+        uses: actions/upload-artifact@v4
+        with:
+          name: disk-space-log
+          path: disk_space.txt
+          retention-days: 1
