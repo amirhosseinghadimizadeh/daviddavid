@@ -1,0 +1,126 @@
+name: Live Site Automation
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Website URL (e.g., https://example.com)'
+        required: true
+        type: string
+      action:
+        description: 'What to do?'
+        required: true
+        default: 'screenshot'
+        type: choice
+        options:
+          - screenshot
+          - scrape_html
+          - click_first_button
+          - fill_and_submit
+
+jobs:
+  automate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Puppeteer
+        run: npm install puppeteer
+
+      - name: Create automation script
+        run: |
+          cat > automate.mjs << 'EOF'
+          import puppeteer from 'puppeteer';
+          import fs from 'fs';
+
+          const url = process.argv[2];
+          const action = process.argv[3];
+
+          if (!url) {
+            console.error('No URL provided');
+            process.exit(1);
+          }
+
+          console.log(`Launching browser...`);
+          const browser = await puppeteer.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+          });
+          const page = await browser.newPage();
+
+          console.log(`Navigating to ${url}...`);
+          await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+
+          if (action === 'screenshot') {
+            console.log(`Taking full-page screenshot...`);
+            await page.screenshot({ path: 'result.png', fullPage: true });
+          }
+          else if (action === 'scrape_html') {
+            console.log(`Extracting HTML after JS execution...`);
+            const html = await page.content();
+            fs.writeFileSync('result.html', html);
+          }
+          else if (action === 'click_first_button') {
+            console.log(`Looking for first clickable element...`);
+            const clicked = await page.evaluate(() => {
+              const btn = document.querySelector('button, a[href], input[type="submit"]');
+              if (btn) { btn.click(); return true; }
+              return false;
+            });
+            if (clicked) {
+              console.log(`Clicked, waiting for navigation...`);
+              await page.waitForNavigation({ timeout: 10000 });
+              await page.screenshot({ path: 'result.png', fullPage: true });
+            } else {
+              console.log(`No clickable element found, taking screenshot anyway.`);
+              await page.screenshot({ path: 'result.png', fullPage: true });
+            }
+          }
+          else if (action === 'fill_and_submit') {
+            console.log(`Looking for search/input field...`);
+            const filled = await page.evaluate(() => {
+              const input = document.querySelector('input[type="search"], input[name="q"], input[name="s"], input[type="text"]');
+              if (input) {
+                input.value = 'github actions';
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                // Try to submit the form
+                const form = input.closest('form');
+                if (form) form.submit();
+                return true;
+              }
+              return false;
+            });
+            if (filled) {
+              console.log(`Form submitted, waiting for navigation...`);
+              await page.waitForNavigation({ timeout: 10000 });
+              await page.screenshot({ path: 'result.png', fullPage: true });
+            } else {
+              console.log(`No input field found, taking screenshot of current page.`);
+              await page.screenshot({ path: 'result.png', fullPage: true });
+            }
+          }
+          else {
+            console.log(`Unknown action: ${action}`);
+            await browser.close();
+            process.exit(1);
+          }
+
+          await browser.close();
+          console.log('Done.');
+          EOF
+
+      - name: Run automation
+        run: node automate.mjs "${{ inputs.url }}" "${{ inputs.action }}"
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: automation-result
+          path: |
+            result.png
+            result.html
+          retention-days: 7
+          if-no-files-found: warn
