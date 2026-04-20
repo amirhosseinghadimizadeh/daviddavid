@@ -1,24 +1,48 @@
-name: YouTube Downloader (Proxy)
+name: YouTube Downloader (April 2026)
 
 on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: 'YouTube URL'
+        description: 'YouTube Video URL'
         required: true
         type: string
+      format:
+        description: 'Format to download'
+        required: true
+        default: 'video'
+        type: choice
+        options:
+          - video
+          - audio
 
 jobs:
   download:
     runs-on: ubuntu-latest
+    container:
+      # This is the official Docker image with the POT provider pre-configured
+      image: ghcr.io/jim60105/yt-dlp:pot
     steps:
-      - name: Download via proxy
+      - name: Download YouTube Video
+        if: inputs.format == 'video'
         run: |
-          URL="${{ inputs.video_url }}"
-          # Public proxy that returns direct download link
-          curl -L "https://yt-downloader.deno.dev/download?url=$URL" -o video.mp4
-      - name: Upload
+          yt-dlp --force-ipv4 \
+            -f "best[ext=mp4]/best" \
+            -o "%(title)s.%(ext)s" \
+            "${{ inputs.video_url }}"
+          echo "OUT_FILE=$(ls *.mp4 *.webm *.mkv | head -1)" >> $GITHUB_ENV
+      - name: Download YouTube Audio
+        if: inputs.format == 'audio'
+        run: |
+          yt-dlp --force-ipv4 \
+            -f "bestaudio" \
+            --extract-audio --audio-format mp3 \
+            -o "%(title)s.%(ext)s" \
+            "${{ inputs.video_url }}"
+          echo "OUT_FILE=$(ls *.mp3 | head -1)" >> $GITHUB_ENV
+      - name: Upload as artifact
         uses: actions/upload-artifact@v4
         with:
           name: youtube-download
-          path: video.mp4
+          path: ${{ env.OUT_FILE }}
+          retention-days: 90
