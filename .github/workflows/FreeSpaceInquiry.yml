@@ -1,0 +1,4 @@
+- name: Show free space
+  run: |
+    echo "=== Disk usage ==="
+    df -h / | awk 'NR==2 {print "Free: " $4 " out of " $2 " total (" $5 " used)"}'
