@@ -1,9 +1,9 @@
-name: Download YouTube Video
+name: YouTube Downloader (April 2026)
 
 on:
   workflow_dispatch:
     inputs:
-      url:
+      video_url:
         description: 'YouTube Video URL'
         required: true
         type: string
@@ -19,17 +19,67 @@ on:
 jobs:
   download:
     runs-on: ubuntu-latest
-    # The container: line is the key to the solution
-    container:
-      image: ghcr.io/recorder-moe/yt-dlp:pot
     steps:
-      - name: Download the video
-        if: inputs.format == 'video'
-        run: yt-dlp -f "best[ext=mp4]/best" -o "%(title)s.%(ext)s" "${{ inputs.url }}"
-      - name: Download the audio
-        if: inputs.format == 'audio'
-        run: yt-dlp -f "bestaudio" --extract-audio --audio-format mp3 -o "%(title)s.%(ext)s" "${{ inputs.url }}"
-      - name: Upload the file
+      # Step 1: Install the latest yt-dlp nightly and ffmpeg
+      - name: Install yt-dlp and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install --upgrade yt-dlp
+      
+      # Step 2: Attempt download with a client fallback strategy
+      - name: Download Media with Client Fallback
+        run: |
+          URL="${{ inputs.video_url }}"
+          FORMAT="${{ inputs.format }}"
+
+          # Define an array of clients to try, from most to least likely to work
+          clients=("web_safari" "ios" "android" "tv")
+
+          for client in "${clients[@]}"; do
+            echo "Trying client: $client"
+
+            if [ "$FORMAT" = "video" ]; then
+              if yt-dlp --force-ipv4 \
+                --extractor-args "youtube:player_client=$client" \
+                -f "best[ext=mp4]/best" \
+                -o "%(title)s.%(ext)s" \
+                "$URL"; then
+                echo "Download successful with client: $client"
+                exit 0
+              fi
+            else
+              if yt-dlp --force-ipv4 \
+                --extractor-args "youtube:player_client=$client" \
+                -f "bestaudio" \
+                --extract-audio --audio-format mp3 \
+                -o "%(title)s.%(ext)s" \
+                "$URL"; then
+                echo "Download successful with client: $client"
+                exit 0
+              fi
+            fi
+          done
+
+          echo "All clients failed. Attempting browser impersonation as a final fallback."
+
+          if [ "$FORMAT" = "video" ]; then
+            yt-dlp --force-ipv4 \
+              --impersonate chrome \
+              -f "best[ext=mp4]/best" \
+              -o "%(title)s.%(ext)s" \
+              "$URL"
+          else
+            yt-dlp --force-ipv4 \
+              --impersonate chrome \
+              -f "bestaudio" \
+              --extract-audio --audio-format mp3 \
+              -o "%(title)s.%(ext)s" \
+              "$URL"
+          fi
+
+      # Step 3: Upload the downloaded file as an artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: youtube-download
