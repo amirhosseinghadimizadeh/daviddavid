@@ -1,0 +1,102 @@
+name: Scrape Telegram Channel
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel_name:
+        description: 'Channel username (without @)'
+        required: true
+        type: string
+      post_limit:
+        description: 'Number of posts to scrape'
+        required: false
+        default: '20'
+        type: string
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Scrape channel
+        env:
+          CHANNEL: ${{ inputs.channel_name }}
+          LIMIT: ${{ inputs.post_limit }}
+        run: |
+          python3 << 'EOF'
+          import os
+          import re
+          import json
+          import time
+          import requests
+          from bs4 import BeautifulSoup
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          channel = os.environ['CHANNEL']
+          limit = int(os.environ['LIMIT'])
+
+          # Create directories for output
+          Path(f"telegram_{channel}").mkdir(exist_ok=True)
+          Path(f"telegram_{channel}/images").mkdir(exist_ok=True)
+
+          print(f"Scraping https://t.me/s/{channel} ...")
+          response = requests.get(f"https://t.me/s/{channel}", timeout=30)
+          response.raise_for_status()
+
+          soup = BeautifulSoup(response.text, "html.parser")
+          messages = soup.select(".tgme_widget_message")[:limit]
+          print(f"Found {len(messages)} messages.")
+
+          posts = []
+          for idx, msg in enumerate(messages):
+              # Extract text
+              text_div = msg.select_one(".tgme_widget_message_text")
+              text = text_div.get_text(strip=True) if text_div else ""
+
+              # Extract date
+              date_tag = msg.select_one("time")
+              date = date_tag.get("datetime") if date_tag else ""
+
+              # Extract views
+              views_span = msg.select_one(".tgme_widget_message_views")
+              views = views_span.get_text(strip=True) if views_span else "0"
+
+              # Extract image URLs
+              img_tags = msg.select(".tgme_widget_message_photo img")
+              image_urls = [img.get("src") for img in img_tags if img.get("src")]
+              downloaded_images = []
+
+              for img_url in image_urls:
+                  img_response = requests.get(img_url, stream=True)
+                  if img_response.status_code == 200:
+                      img_name = f"image_{idx}_{int(time.time())}.jpg"
+                      img_path = f"telegram_{channel}/images/{img_name}"
+                      with open(img_path, "wb") as img_file:
+                          for chunk in img_response.iter_content(1024):
+                              img_file.write(chunk)
+                      downloaded_images.append(img_name)
+                      print(f"  Downloaded image: {img_name}")
+
+              posts.append({
+                  "text": text,
+                  "date": date,
+                  "views": views,
+                  "images": downloaded_images
+              })
+
+          # Save all data to a JSON file
+          with open(f"telegram_{channel}/posts.json", "w", encoding="utf-8") as f:
+              json.dump(posts, f, indent=2, ensure_ascii=False)
+
+          print(f"\n✅ Scraping complete. Saved {len(posts)} posts to telegram_{channel}/")
+          EOF
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-data-${{ inputs.channel_name }}
+          path: telegram_${{ inputs.channel_name }}/
+          retention-days: 7
