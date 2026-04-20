@@ -1,4 +1,4 @@
-name: Mirror Website (Fully Offline)V2
+name: Mirror Website (Fully Offline)V3
 
 on:
   workflow_dispatch:
