@@ -1,40 +1,79 @@
-name: Download and Archive Website
+name: Download Full Website (Offline Ready)
 
 on:
   workflow_dispatch:
     inputs:
-      site_url:
-        description: 'The full URL of the website to download (e.g., https://example.com)'
+      url:
+        description: 'Website URL (e.g., https://www.bbc.com)'
         required: true
         type: string
-      max_pages:
-        description: 'Maximum number of pages to download'
+      depth:
+        description: 'Maximum link depth (1-5)'
         required: false
-        default: '100'
+        default: '3'
         type: string
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
     steps:
-      - name: Install website-downloader
-        run: |
-          git clone https://github.com/PKHarsimran/website-downloader.git
-          cd website-downloader
-          pip install -r requirements.txt
+      - name: Install wget2
+        run: sudo apt-get update && sudo apt-get install -y wget2
 
-      - name: Run website-downloader
+      - name: Download website with wget2
         run: |
-          cd website-downloader
-          python website-downloader.py \
-            --url "${{ inputs.site_url }}" \
-            --destination ./downloaded_site \
-            --max-pages ${{ inputs.max_pages }} \
-            --threads 8
+          URL="${{ inputs.url }}"
+          DEPTH="${{ inputs.depth }}"
+          DOMAIN=$(echo "$URL" | awk -F/ '{print $3}')
 
-      - name: Upload result as artifact
+          mkdir -p website_mirror
+          cd website_mirror
+
+          # wget2 options:
+          # -r : recursive
+          # -l : max depth
+          # -p : page requisites (images, CSS, JS)
+          # -k : convert links for offline use
+          # -E : adjust extension (.html)
+          # -np : no parent
+          # --span-hosts : allow external assets (CDNs)
+          # --restrict-file-names=windows : avoid special chars
+          # --user-agent : pretend to be real browser
+          wget2 -r -l $DEPTH -p -k -E -np \
+            --span-hosts \
+            --restrict-file-names=windows \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            --timeout=30 \
+            --tries=3 \
+            --wait=1 \
+            --limit-rate=500k \
+            "$URL"
+
+          # Remove wget2's temporary files
+          rm -f *.tmp
+
+      - name: Fix file/directory conflicts (e.g., /video/docs vs /video/docs.html)
+        run: |
+          cd website_mirror
+          # Find any path where a file has the same name as a directory
+          # Move the file to a unique name (append _file)
+          find . -type f -print0 | while IFS= read -r -d '' file; do
+            dirpart="${file%/*}"
+            base="${file##*/}"
+            # If base is "docs" and there's a directory "docs" in the same parent, rename file
+            if [ -d "$dirpart/$base" ]; then
+              newname="${base}_file"
+              echo "Conflict: $file -> $dirpart/$newname"
+              mv "$file" "$dirpart/$newname"
+            fi
+          done
+
+      - name: Compress into ZIP
+        run: zip -r website_mirror.zip website_mirror/
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: downloaded-website
-          path: website-downloader/downloaded_site/
+          name: website-mirror
+          path: website_mirror.zip
           retention-days: 7
