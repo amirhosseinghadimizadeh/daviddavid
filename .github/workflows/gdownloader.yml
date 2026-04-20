@@ -1,0 +1,70 @@
+name: Download Full Website
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Full website URL (e.g., https://example.com)'
+        required: true
+        type: string
+      max_depth:
+        description: 'Maximum recursion depth (5 = pages within 5 clicks)'
+        required: false
+        default: '3'
+        type: string
+      exclude_patterns:
+        description: 'Comma-separated patterns to exclude (e.g., *.zip, *.pdf)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create output directory
+        run: mkdir -p website_mirror
+
+      - name: Mirror website with wget
+        run: |
+          cd website_mirror
+          URL="${{ inputs.url }}"
+          DEPTH=${{ inputs.max_depth }}
+          EXCLUDE="${{ inputs.exclude_patterns }}"
+
+          # Build wget command
+          CMD="wget --mirror \
+            --convert-links \
+            --adjust-extension \
+            --page-requisites \
+            --no-parent \
+            --wait=2 \
+            --random-wait \
+            --limit-rate=500k \
+            --directory-prefix=. \
+            --level=$DEPTH \
+            --reject-regex='$EXCLUDE' \
+            --no-verbose \
+            --show-progress \
+            --timestamping"
+
+          # Add host directory (preserve domain folder)
+          CMD="$CMD --domains=$(echo $URL | awk -F/ '{print $3}') --span-hosts"
+
+          # Execute
+          echo "Running: $CMD $URL"
+          eval "$CMD $URL"
+
+          # Remove wget's temporary files (if any)
+          rm -f *.tmp
+
+      - name: Compress mirror
+        run: |
+          zip -r website_mirror.zip website_mirror/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: website-mirror
+          path: website_mirror.zip
+          retention-days: 7
