@@ -1,0 +1,71 @@
+name: YouTube API Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'YouTube Video URL'
+        required: true
+        type: string
+      format:
+        description: 'Format to download'
+        required: true
+        default: 'video'
+        type: choice
+        options:
+          - video
+          - audio
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Get Download URL from API
+        id: get_url
+        run: |
+          FORMAT_FLAG="${{ inputs.format }}"
+          URL="${{ inputs.video_url }}"
+          
+          if [ "$FORMAT_FLAG" = "video" ]; then
+            # Request a video download (mp4)
+            RESPONSE=$(curl -s -X POST "https://yt-api.alexbic.me/download_video" \
+              -H "Content-Type: application/json" \
+              -d "{\"url\": \"$URL\"}")
+            
+            DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.url')
+            if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+              echo "Failed to get video URL"
+              exit 1
+            fi
+            echo "FILE_EXT=mp4" >> $GITHUB_ENV
+          else
+            # Request an audio download (mp3)
+            RESPONSE=$(curl -s -X POST "https://yt-api.alexbic.me/download_audio" \
+              -H "Content-Type: application/json" \
+              -d "{\"url\": \"$URL\"}")
+            
+            DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.url')
+            if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+              echo "Failed to get audio URL"
+              exit 1
+            fi
+            echo "FILE_EXT=mp3" >> $GITHUB_ENV
+          fi
+          
+          echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
+
+      - name: Download the file
+        run: |
+          FILENAME="youtube_video.${{ env.FILE_EXT }}"
+          curl -L -o "$FILENAME" "${{ env.DOWNLOAD_URL }}"
+          echo "FILE_NAME=$FILENAME" >> $GITHUB_ENV
+
+      - name: Upload as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-download
+          path: ${{ env.FILE_NAME }}
+          retention-days: 90
