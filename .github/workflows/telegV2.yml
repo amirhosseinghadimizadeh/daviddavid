@@ -29,7 +29,6 @@ jobs:
           import os, re, json, time, requests, html
           from bs4 import BeautifulSoup
           from pathlib import Path
-          from urllib.parse import urlparse
 
           channels = [c.strip() for c in os.environ['CHANNELS'].split(',')]
           limit = int(os.environ['LIMIT'])
@@ -75,7 +74,7 @@ jobs:
                   else:
                       views_num = int(views_raw) if views_raw.isdigit() else 0
 
-                  # --- DOWNLOAD IMAGES ---
+                  # Images
                   img_tags = msg.select(".tgme_widget_message_photo img")
                   downloaded_images = []
                   for img in img_tags:
@@ -85,15 +84,14 @@ jobs:
                               img_resp = requests.get(src, stream=True, timeout=15)
                               if img_resp.status_code == 200:
                                   fname = f"{channel}_{idx}_{int(time.time()*1000)}.jpg"
-                                  fpath = images_dir / fname
-                                  with open(fpath, "wb") as f:
+                                  with open(images_dir / fname, "wb") as f:
                                       for chunk in img_resp.iter_content(1024):
                                           f.write(chunk)
                                   downloaded_images.append(fname)
                           except Exception as e:
                               print(f"      Image download failed: {e}")
 
-                  # --- DOWNLOAD VIDEOS ---
+                  # Videos
                   video_tags = msg.select(".tgme_widget_message_video video")
                   downloaded_videos = []
                   for vid in video_tags:
@@ -103,15 +101,14 @@ jobs:
                               vid_resp = requests.get(src, stream=True, timeout=30)
                               if vid_resp.status_code == 200:
                                   fname = f"{channel}_{idx}_{int(time.time()*1000)}.mp4"
-                                  fpath = videos_dir / fname
-                                  with open(fpath, "wb") as f:
+                                  with open(videos_dir / fname, "wb") as f:
                                       for chunk in vid_resp.iter_content(8192):
                                           f.write(chunk)
                                   downloaded_videos.append(fname)
                           except Exception as e:
                               print(f"      Video download failed: {e}")
 
-                  # --- DOWNLOAD DOCUMENTS (files) ---
+                  # Documents
                   doc_links = msg.select("a.tgme_widget_message_document")
                   downloaded_docs = []
                   for a in doc_links:
@@ -121,13 +118,10 @@ jobs:
                               title_elem = a.select_one(".tgme_widget_message_document_title")
                               doc_name = title_elem.get_text(strip=True) if title_elem else "document"
                               doc_name = re.sub(r'[\\/*?:"<>|]', '_', doc_name)
-                              # get extension from href or filename
-                              ext = os.path.splitext(doc_name)[1] or ".bin"
                               fname = f"{channel}_{idx}_{doc_name}"
-                              fpath = docs_dir / fname
                               doc_resp = requests.get(href, stream=True, timeout=60)
                               if doc_resp.status_code == 200:
-                                  with open(fpath, "wb") as f:
+                                  with open(docs_dir / fname, "wb") as f:
                                       for chunk in doc_resp.iter_content(8192):
                                           f.write(chunk)
                                   downloaded_docs.append(fname)
@@ -145,12 +139,16 @@ jobs:
                       "documents": downloaded_docs
                   })
 
-          # Save raw JSON
+          # Save JSON
           with open(f"{output_dir}/posts.json", "w", encoding="utf-8") as f:
               json.dump(all_posts, f, indent=2, ensure_ascii=False)
 
-          # Generate HTML with media support
-          html_content = f'''<!DOCTYPE html>
+          # Build HTML safely without triggering ${{ }} in YAML
+          unique_channels = sorted(set(p["channel"] for p in all_posts))
+          channel_options = "".join(f'<option value="{c}">@{c}</option>' for c in unique_channels)
+
+          # We'll generate the HTML using string concatenation to avoid any ${{ sequences
+          html_header = f'''<!DOCTYPE html>
           <html>
           <head>
               <meta charset="UTF-8">
@@ -178,7 +176,7 @@ jobs:
               <div class="controls">
                   <select id="channelFilter">
                       <option value="all">All channels</option>
-                      {''.join(f'<option value="{c}">@{c}</option>' for c in set(p["channel"] for p in all_posts))}
+                      {channel_options}
                   </select>
                   <select id="sortBy">
                       <option value="date">Date (newest)</option>
@@ -202,15 +200,15 @@ jobs:
                   if (!filtered.length) {{ container.innerHTML = '<div class="post">No posts match.</div>'; return; }}
                   let html = '';
                   for (let p of filtered) {{
-                      let imagesHtml = p.images.length ? '<div class="media-section"><h4>📸 Images:</h4><div class="images">' + p.images.map(i => `<img src="images/${{i}}" onclick="window.open(this.src)">`).join('') + '</div></div>' : '';
-                      let videosHtml = p.videos.length ? '<div class="media-section"><h4>🎬 Videos:</h4>' + p.videos.map(v => `<video controls src="videos/${{v}}" preload="metadata"></video>`).join('') + '</div>' : '';
-                      let docsHtml = p.documents.length ? '<div class="media-section"><h4>📎 Documents:</h4>' + p.documents.map(d => `<a class="doc-link" href="documents/${{d}}" download>📄 ${{d.split('_').slice(2).join('_')}}</a>`).join('') + '</div>' : '';
+                      let imagesHtml = p.images.length ? '<div class="media-section"><h4>📸 Images:</h4><div class="images">' + p.images.map(i => `<img src="images/''' + '$' + '{i}" onclick="window.open(this.src)">`).join('') + '</div></div>' : '';
+                      let videosHtml = p.videos.length ? '<div class="media-section"><h4>🎬 Videos:</h4>' + p.videos.map(v => `<video controls src="videos/''' + '$' + '{v}" preload="metadata"></video>`).join('') + '</div>' : '';
+                      let docsHtml = p.documents.length ? '<div class="media-section"><h4>📎 Documents:</h4>' + p.documents.map(d => `<a class="doc-link" href="documents/''' + '$' + '{d}" download>📄 ''' + '$' + '{d.split('_').slice(2).join('_')}</a>`).join('') + '</div>' : '';
                       html += `<div class="post">
-                          <div class="channel-badge">@${{p.channel}}</div>
-                          <div class="date">📅 ${{p.date}}</div>
-                          <div class="views">👁️ ${{p.views_str}} views</div>
-                          <div class="message-text">${{html.escape(p.text).replace(/\\n/g, '<br>')}}</div>
-                          ${{imagesHtml}}${{videosHtml}}${{docsHtml}}
+                          <div class="channel-badge">@''' + '$' + '{p.channel}</div>
+                          <div class="date">📅 ''' + '$' + '{p.date}</div>
+                          <div class="views">👁️ ''' + '$' + '{p.views_str} views</div>
+                          <div class="message-text">''' + '$' + '{p.text.replace(/\\\\n/g, '<br>')}</div>
+                          ''' + '$' + '{imagesHtml}''' + '$' + '{videosHtml}''' + '$' + '{docsHtml}
                       </div>`;
                   }}
                   container.innerHTML = html;
@@ -223,8 +221,11 @@ jobs:
           </body>
           </html>
           '''
+
+          # The above uses string concatenation to insert the dollar sign and braces safely.
+          # Now write the HTML file
           with open(f"{output_dir}/report.html", "w", encoding="utf-8") as f:
-              f.write(html_content)
+              f.write(html_header)
 
           print(f"\n✅ Scraping complete. Report saved in {output_dir}/report.html")
           EOF
