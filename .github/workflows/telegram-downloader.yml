@@ -1,0 +1,108 @@
+name: Telegram Channel Media Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel_username:
+        description: 'Telegram channel username (e.g., "durov" or "telegram")'
+        required: true
+        type: string
+      message_limit:
+        description: 'Number of recent messages to scan (max 50)'
+        required: false
+        default: '20'
+        type: string
+      media_types:
+        description: 'Media types to download (comma-separated: image,video,document)'
+        required: false
+        default: 'image,video'
+        type: string
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip
+          pip3 install beautifulsoup4 requests
+
+      - name: Run Telegram scraper
+        run: |
+          python3 << 'EOF'
+          import requests
+          from bs4 import BeautifulSoup
+          import re
+          import os
+          import time
+          from urllib.parse import urljoin, urlparse
+          
+          CHANNEL = "${{ inputs.channel_username }}"
+          LIMIT = int("${{ inputs.message_limit }}")
+          MEDIA_TYPES = "${{ inputs.media_types }}".split(',')
+          
+          # Create download folder
+          os.makedirs("downloads", exist_ok=True)
+          
+          # Fetch channel page
+          url = f"https://t.me/s/{CHANNEL}"
+          print(f"Fetching {url}")
+          resp = requests.get(url, timeout=30)
+          resp.raise_for_status()
+          soup = BeautifulSoup(resp.text, 'html.parser')
+          
+          # Find all message containers
+          messages = soup.find_all('div', class_='tgme_widget_message')
+          messages = messages[:LIMIT]
+          print(f"Found {len(messages)} messages")
+          
+          downloaded = 0
+          for idx, msg in enumerate(messages):
+              # Extract media elements
+              # Images: img tags inside message
+              imgs = msg.find_all('img', class_='tgme_widget_message_photo')
+              for img in imgs:
+                  src = img.get('src')
+                  if src and 'image' in MEDIA_TYPES:
+                      download_file(src, f"downloads/{CHANNEL}_msg{idx}_img.jpg")
+                      downloaded += 1
+              
+              # Videos: video tag or link to video
+              videos = msg.find_all('video')
+              for vid in videos:
+                  src = vid.get('src')
+                  if src and 'video' in MEDIA_TYPES:
+                      download_file(src, f"downloads/{CHANNEL}_msg{idx}_video.mp4")
+                      downloaded += 1
+              
+              # Documents / files: links with class 'tgme_widget_message_document'
+              docs = msg.find_all('a', class_='tgme_widget_message_document')
+              for doc in docs:
+                  href = doc.get('href')
+                  if href and 'document' in MEDIA_TYPES:
+                      # Get filename from link text or data attribute
+                      filename = doc.find('div', class_='tgme_widget_message_document_title')
+                      name = filename.text.strip() if filename else f"doc_{idx}"
+                      download_file(href, f"downloads/{CHANNEL}_{name}")
+                      downloaded += 1
+          
+          print(f"Downloaded {downloaded} files")
+          
+          def download_file(url, path):
+              try:
+                  r = requests.get(url, timeout=60)
+                  r.raise_for_status()
+                  with open(path, 'wb') as f:
+                      f.write(r.content)
+                  print(f"Saved: {path}")
+              except Exception as e:
+                  print(f"Failed {url}: {e}")
+          EOF
+
+      - name: Upload downloaded media
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-media
+          path: downloads/
+          retention-days: 90
