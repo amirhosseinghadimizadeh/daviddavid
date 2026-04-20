@@ -1,79 +1,84 @@
-name: Download Full Website (Offline Ready)
+name: Download Full Website (Debug)
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'Website URL (e.g., https://www.bbc.com)'
+        description: 'Website URL (must start with https://)'
         required: true
         type: string
       depth:
-        description: 'Maximum link depth (1-5)'
+        description: 'Maximum link depth (1-3)'
         required: false
-        default: '3'
+        default: '2'
         type: string
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
     steps:
-      - name: Install wget2
-        run: sudo apt-get update && sudo apt-get install -y wget2
+      - name: Install wget
+        run: sudo apt-get update && sudo apt-get install -y wget
 
-      - name: Download website with wget2
+      - name: Create output directory
+        run: mkdir -p website_mirror
+
+      - name: Download website with wget (verbose)
         run: |
+          cd website_mirror
           URL="${{ inputs.url }}"
           DEPTH="${{ inputs.depth }}"
           DOMAIN=$(echo "$URL" | awk -F/ '{print $3}')
-
-          mkdir -p website_mirror
-          cd website_mirror
-
-          # wget2 options:
-          # -r : recursive
-          # -l : max depth
-          # -p : page requisites (images, CSS, JS)
-          # -k : convert links for offline use
-          # -E : adjust extension (.html)
-          # -np : no parent
-          # --span-hosts : allow external assets (CDNs)
-          # --restrict-file-names=windows : avoid special chars
-          # --user-agent : pretend to be real browser
-          wget2 -r -l $DEPTH -p -k -E -np \
-            --span-hosts \
+          
+          echo "=== Starting download of $URL (depth $DEPTH) ==="
+          
+          wget \
+            --recursive \
+            --level=$DEPTH \
+            --no-clobber \
+            --page-requisites \
+            --adjust-extension \
+            --convert-links \
             --restrict-file-names=windows \
-            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            --timeout=30 \
-            --tries=3 \
+            --domains=$DOMAIN \
+            --no-parent \
             --wait=1 \
+            --random-wait \
             --limit-rate=500k \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            --verbose \
+            --debug \
+            --output-file=wget.log \
             "$URL"
+          
+          echo "=== Download finished ==="
+          echo "Files in current directory:"
+          ls -la
+          echo "=== wget.log last 50 lines ==="
+          tail -50 wget.log
 
-          # Remove wget2's temporary files
-          rm -f *.tmp
-
-      - name: Fix file/directory conflicts (e.g., /video/docs vs /video/docs.html)
+      - name: Check if any files were downloaded
         run: |
           cd website_mirror
-          # Find any path where a file has the same name as a directory
-          # Move the file to a unique name (append _file)
-          find . -type f -print0 | while IFS= read -r -d '' file; do
-            dirpart="${file%/*}"
-            base="${file##*/}"
-            # If base is "docs" and there's a directory "docs" in the same parent, rename file
-            if [ -d "$dirpart/$base" ]; then
-              newname="${base}_file"
-              echo "Conflict: $file -> $dirpart/$newname"
-              mv "$file" "$dirpart/$newname"
-            fi
-          done
+          FILE_COUNT=$(find . -type f | wc -l)
+          echo "Total files downloaded: $FILE_COUNT"
+          if [ $FILE_COUNT -eq 0 ]; then
+            echo "ERROR: No files were downloaded. Check the URL and network."
+            echo "wget.log content:"
+            cat wget.log
+            exit 1
+          fi
 
-      - name: Compress into ZIP
+      - name: Compress (only if files exist)
+        if: success()
         run: zip -r website_mirror.zip website_mirror/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: website-mirror
-          path: website_mirror.zip
+          path: |
+            website_mirror.zip
+            website_mirror/wget.log
           retention-days: 7
