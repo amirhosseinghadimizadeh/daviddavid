@@ -1,0 +1,400 @@
+name: Telegram Channel ScraperV3
+
+on:
+  workflow_dispatch:
+    inputs:
+      channels:
+        description: 'Channel usernames (comma-separated, no @)'
+        required: true
+        type: string
+      posts_per_channel:
+        description: 'Number of posts per channel'
+        required: false
+        default: '20'
+        type: string
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Create scraper script
+        run: |
+          cat > scrape.py << 'EOF'
+          import os, re, json, time, requests, html
+          from bs4 import BeautifulSoup
+          from pathlib import Path
+          from datetime import datetime
+
+          channels = [c.strip() for c in os.environ['CHANNELS'].split(',')]
+          limit = int(os.environ['LIMIT'])
+
+          output_dir = "telegram_report"
+          Path(output_dir).mkdir(exist_ok=True)
+          images_dir = Path(output_dir) / "images"
+          videos_dir = Path(output_dir) / "videos"
+          docs_dir = Path(output_dir) / "documents"
+          images_dir.mkdir(exist_ok=True)
+          videos_dir.mkdir(exist_ok=True)
+          docs_dir.mkdir(exist_ok=True)
+
+          all_posts = []
+
+          for channel in channels:
+              print(f"\n📡 Scraping @{channel} ...")
+              try:
+                  resp = requests.get(f"https://t.me/s/{channel}", timeout=30)
+                  resp.raise_for_status()
+              except Exception as e:
+                  print(f"❌ Failed: {e}")
+                  continue
+
+              soup = BeautifulSoup(resp.text, "html.parser")
+              messages = soup.select(".tgme_widget_message")[:limit]
+              print(f"   Found {len(messages)} messages")
+
+              for idx, msg in enumerate(messages):
+                  text_div = msg.select_one(".tgme_widget_message_text")
+                  text = text_div.get_text(strip=True) if text_div else ""
+
+                  date_tag = msg.select_one("time")
+                  date_str = date_tag.get("datetime") if date_tag else ""
+                  # Parse date for sorting
+                  try:
+                      date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00')) if date_str else datetime.now()
+                  except:
+                      date_obj = datetime.now()
+
+                  views_span = msg.select_one(".tgme_widget_message_views")
+                  views_str = views_span.get_text(strip=True) if views_span else "0"
+
+                  # Download images
+                  img_tags = msg.select(".tgme_widget_message_photo img")
+                  images = []
+                  for img in img_tags:
+                      src = img.get("src")
+                      if src:
+                          try:
+                              r = requests.get(src, stream=True, timeout=15)
+                              if r.status_code == 200:
+                                  fname = f"{channel}_{idx}_{int(time.time()*1000)}.jpg"
+                                  with open(images_dir / fname, "wb") as f:
+                                      for chunk in r.iter_content(1024):
+                                          f.write(chunk)
+                                  images.append(fname)
+                          except Exception as e:
+                              print(f"      Image error: {e}")
+
+                  # Download videos
+                  video_tags = msg.select(".tgme_widget_message_video video")
+                  videos = []
+                  for vid in video_tags:
+                      src = vid.get("src")
+                      if src:
+                          try:
+                              r = requests.get(src, stream=True, timeout=30)
+                              if r.status_code == 200:
+                                  fname = f"{channel}_{idx}_{int(time.time()*1000)}.mp4"
+                                  with open(videos_dir / fname, "wb") as f:
+                                      for chunk in r.iter_content(8192):
+                                          f.write(chunk)
+                                  videos.append(fname)
+                          except Exception as e:
+                              print(f"      Video error: {e}")
+
+                  # Download documents
+                  doc_links = msg.select("a.tgme_widget_message_document")
+                  docs = []
+                  for a in doc_links:
+                      href = a.get("href")
+                      if href:
+                          try:
+                              title_elem = a.select_one(".tgme_widget_message_document_title")
+                              doc_name = title_elem.get_text(strip=True) if title_elem else "document"
+                              doc_name = re.sub(r'[\\/*?:"<>|]', '_', doc_name)
+                              fname = f"{channel}_{idx}_{doc_name}"
+                              r = requests.get(href, stream=True, timeout=60)
+                              if r.status_code == 200:
+                                  with open(docs_dir / fname, "wb") as f:
+                                      for chunk in r.iter_content(8192):
+                                          f.write(chunk)
+                                  docs.append(fname)
+                          except Exception as e:
+                              print(f"      Document error: {e}")
+
+                  all_posts.append({
+                      "channel": channel,
+                      "text": text,
+                      "date_str": date_str,
+                      "date_obj": date_obj.isoformat(),
+                      "views": views_str,
+                      "images": images,
+                      "videos": videos,
+                      "documents": docs
+                  })
+
+          # Sort posts from oldest to newest
+          all_posts.sort(key=lambda x: x["date_obj"])
+
+          # Save JSON
+          with open(f"{output_dir}/posts.json", "w", encoding="utf-8") as f:
+              json.dump(all_posts, f, indent=2, ensure_ascii=False)
+
+          # Build HTML
+          unique_channels = sorted(set(p["channel"] for p in all_posts))
+          channel_options = "".join(f'<option value="{c}">@{c}</option>' for c in unique_channels)
+
+          html_template = """<!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Telegram Scraper Report</title>
+              <style>
+                  * { margin: 0; padding: 0; box-sizing: border-box; }
+                  body {
+                      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                      min-height: 100vh;
+                      padding: 2rem;
+                  }
+                  .container {
+                      max-width: 1000px;
+                      margin: 0 auto;
+                  }
+                  .header {
+                      background: rgba(255,255,255,0.95);
+                      border-radius: 24px;
+                      padding: 1.5rem 2rem;
+                      margin-bottom: 2rem;
+                      box-shadow: 0 10px 25px -5px rgba(0,0,0,0.2);
+                      backdrop-filter: blur(10px);
+                  }
+                  h1 {
+                      background: linear-gradient(135deg, #667eea, #764ba2);
+                      -webkit-background-clip: text;
+                      background-clip: text;
+                      color: transparent;
+                      font-size: 2rem;
+                      margin-bottom: 1rem;
+                  }
+                  .controls {
+                      display: flex;
+                      gap: 1rem;
+                      flex-wrap: wrap;
+                      margin-top: 1rem;
+                  }
+                  select, input {
+                      padding: 0.5rem 1rem;
+                      border-radius: 40px;
+                      border: 1px solid #ddd;
+                      background: white;
+                      font-size: 0.9rem;
+                      cursor: pointer;
+                  }
+                  input {
+                      flex: 1;
+                      min-width: 200px;
+                  }
+                  .post {
+                      background: white;
+                      border-radius: 24px;
+                      margin-bottom: 2rem;
+                      overflow: hidden;
+                      box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1);
+                      transition: transform 0.2s ease, box-shadow 0.2s ease;
+                  }
+                  .post:hover {
+                      transform: translateY(-4px);
+                      box-shadow: 0 20px 30px -10px rgba(0,0,0,0.15);
+                  }
+                  .post-header {
+                      background: #f8f9fa;
+                      padding: 1rem 1.5rem;
+                      border-bottom: 1px solid #e9ecef;
+                      display: flex;
+                      justify-content: space-between;
+                      align-items: center;
+                      flex-wrap: wrap;
+                  }
+                  .channel-badge {
+                      background: linear-gradient(135deg, #667eea, #764ba2);
+                      color: white;
+                      padding: 0.25rem 0.75rem;
+                      border-radius: 40px;
+                      font-size: 0.8rem;
+                      font-weight: 600;
+                  }
+                  .date {
+                      color: #6c757d;
+                      font-size: 0.85rem;
+                  }
+                  .views {
+                      background: #e9ecef;
+                      padding: 0.25rem 0.75rem;
+                      border-radius: 40px;
+                      font-size: 0.75rem;
+                      color: #495057;
+                  }
+                  .post-content {
+                      padding: 1.5rem;
+                  }
+                  .message-text {
+                      font-size: 1rem;
+                      line-height: 1.5;
+                      color: #212529;
+                      margin-bottom: 1.5rem;
+                      white-space: pre-wrap;
+                  }
+                  .media-section {
+                      margin-top: 1.5rem;
+                  }
+                  .media-section h4 {
+                      font-size: 0.9rem;
+                      font-weight: 600;
+                      margin-bottom: 0.75rem;
+                      color: #495057;
+                  }
+                  .images-grid {
+                      display: grid;
+                      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+                      gap: 0.75rem;
+                  }
+                  .images-grid img {
+                      width: 100%;
+                      height: auto;
+                      border-radius: 12px;
+                      cursor: pointer;
+                      transition: transform 0.2s;
+                      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+                  }
+                  .images-grid img:hover {
+                      transform: scale(1.02);
+                  }
+                  .videos-grid {
+                      display: flex;
+                      flex-wrap: wrap;
+                      gap: 1rem;
+                  }
+                  video {
+                      max-width: 300px;
+                      border-radius: 12px;
+                      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                  }
+                  .doc-link {
+                      display: inline-flex;
+                      align-items: center;
+                      gap: 0.5rem;
+                      background: #f1f3f5;
+                      padding: 0.5rem 1rem;
+                      border-radius: 40px;
+                      text-decoration: none;
+                      color: #364fc7;
+                      font-size: 0.85rem;
+                      margin: 0.25rem;
+                      transition: background 0.2s;
+                  }
+                  .doc-link:hover {
+                      background: #e9ecef;
+                  }
+                  .footer {
+                      text-align: center;
+                      margin-top: 2rem;
+                      color: rgba(255,255,255,0.8);
+                      font-size: 0.8rem;
+                  }
+                  @media (max-width: 700px) {
+                      body { padding: 1rem; }
+                      .images-grid { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); }
+                      video { max-width: 100%; }
+                  }
+              </style>
+          </head>
+          <body>
+          <div class="container">
+              <div class="header">
+                  <h1>📡 Telegram Scraper Report</h1>
+                  <div class="controls">
+                      <select id="channelFilter">
+                          <option value="all">All channels</option>
+                          __CHANNEL_OPTIONS__
+                      </select>
+                      <input type="text" id="searchInput" placeholder="Search in messages...">
+                  </div>
+              </div>
+              <div id="postsContainer"></div>
+              <div class="footer">
+                  Generated on __DATE__ · __POST_COUNT__ posts · Oldest to newest
+              </div>
+          </div>
+          <script>
+              const postsData = __POSTS_DATA__;
+              function render() {
+                  let channel = document.getElementById('channelFilter').value;
+                  let search = document.getElementById('searchInput').value.toLowerCase();
+                  let filtered = postsData.filter(p => (channel === 'all' || p.channel === channel) && (!search || p.text.toLowerCase().includes(search)));
+                  let container = document.getElementById('postsContainer');
+                  if (!filtered.length) {
+                      container.innerHTML = '<div class="post"><div class="post-content" style="text-align:center;">No posts match your filters.</div></div>';
+                      return;
+                  }
+                  let html = '';
+                  for (let p of filtered) {
+                      let imagesHtml = '';
+                      if (p.images.length) {
+                          imagesHtml = `<div class="media-section"><h4>📸 Images</h4><div class="images-grid">${p.images.map(i => `<img src="images/${i}" onclick="window.open(this.src)">`).join('')}</div></div>`;
+                      }
+                      let videosHtml = '';
+                      if (p.videos.length) {
+                          videosHtml = `<div class="media-section"><h4>🎬 Videos</h4><div class="videos-grid">${p.videos.map(v => `<video controls src="videos/${v}" preload="metadata"></video>`).join('')}</div></div>`;
+                      }
+                      let docsHtml = '';
+                      if (p.documents.length) {
+                          docsHtml = `<div class="media-section"><h4>📎 Documents</h4><div>${p.documents.map(d => `<a class="doc-link" href="documents/${d}" download>📄 ${d.split('_').slice(2).join('_')}</a>`).join('')}</div></div>`;
+                      }
+                      html += `<div class="post">
+                          <div class="post-header">
+                              <span class="channel-badge">@${p.channel}</span>
+                              <span class="date">📅 ${p.date_str}</span>
+                              <span class="views">👁️ ${p.views}</span>
+                          </div>
+                          <div class="post-content">
+                              <div class="message-text">${p.text.replace(/\\n/g, '<br>')}</div>
+                              ${imagesHtml}${videosHtml}${docsHtml}
+                          </div>
+                      </div>`;
+                  }
+                  container.innerHTML = html;
+              }
+              document.getElementById('channelFilter').addEventListener('change', render);
+              document.getElementById('searchInput').addEventListener('input', render);
+              render();
+          </script>
+          </body>
+          </html>"""
+
+          html_content = html_template.replace("__CHANNEL_OPTIONS__", channel_options)
+          html_content = html_content.replace("__DATE__", datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC'))
+          html_content = html_content.replace("__POST_COUNT__", str(len(all_posts)))
+          html_content = html_content.replace("__POSTS_DATA__", json.dumps(all_posts, ensure_ascii=False))
+
+          with open(f"{output_dir}/report.html", "w", encoding="utf-8") as f:
+              f.write(html_content)
+
+          print(f"\n✅ Success! {len(all_posts)} posts saved in {output_dir}/report.html")
+          EOF
+
+      - name: Run scraper
+        env:
+          CHANNELS: ${{ inputs.channels }}
+          LIMIT: ${{ inputs.posts_per_channel }}
+        run: python3 scrape.py
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-report
+          path: telegram_report/
+          retention-days: 7
