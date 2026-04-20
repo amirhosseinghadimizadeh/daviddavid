@@ -1,55 +1,40 @@
-name: Mirror Website (Fully Offline)V4
+name: Download and Archive Website
 
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: 'Website URL (e.g., https://opensim.io)'
+      site_url:
+        description: 'The full URL of the website to download (e.g., https://example.com)'
         required: true
         type: string
-      depth:
-        description: 'Maximum link depth (3-5)'
+      max_pages:
+        description: 'Maximum number of pages to download'
         required: false
-        default: '3'
+        default: '100'
         type: string
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
     steps:
-      - name: Install HTTrack
-        run: sudo apt-get update && sudo apt-get install -y httrack
-
-      - name: Mirror website with HTTrack
+      - name: Install website-downloader
         run: |
-          URL="${{ inputs.url }}"
-          DEPTH="${{ inputs.depth }}"
+          git clone https://github.com/PKHarsimran/website-downloader.git
+          cd website-downloader
+          pip install -r requirements.txt
 
-          mkdir -p website_mirror
-          cd website_mirror
+      - name: Run website-downloader
+        run: |
+          cd website-downloader
+          python website-downloader.py \
+            --url "${{ inputs.site_url }}" \
+            --destination ./downloaded_site \
+            --max-pages ${{ inputs.max_pages }} \
+            --threads 8
 
-          httrack "$URL" -O . \
-            --depth=$DEPTH \
-            --mirror \
-            --robots=0 \
-            --stay-on-same-domain \
-            --ext-depth=2 \
-            --can-go-up-and-down \
-            --verbose \
-            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-
-          SUBDIR=$(find . -maxdepth 1 -type d -name "*.*" | grep -v "^\.$" | head -1)
-          if [ -n "$SUBDIR" ] && [ "$SUBDIR" != "." ]; then
-            mv "$SUBDIR"/* ./ 2>/dev/null || true
-            rm -rf "$SUBDIR"
-          fi
-
-      - name: Compress into ZIP
-        run: zip -r website_offline.zip website_mirror/
-
-      - name: Upload artifact
+      - name: Upload result as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: website-offline
-          path: website_offline.zip
+          name: downloaded-website
+          path: website-downloader/downloaded_site/
           retention-days: 7
