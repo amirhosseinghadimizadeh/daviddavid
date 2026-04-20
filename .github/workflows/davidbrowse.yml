@@ -1,0 +1,81 @@
+name: Live Site Automation
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Target URL'
+        required: true
+        type: string
+      action:
+        description: 'Action: screenshot, scrape, or click'
+        default: 'screenshot'
+        type: choice
+        options:
+          - screenshot
+          - scrape
+          - click
+
+jobs:
+  automate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Puppeteer
+        run: npm install puppeteer
+
+      - name: Run browser automation
+        run: node script.js
+        env:
+          TARGET_URL: ${{ inputs.url }}
+          ACTION: ${{ inputs.action }}
+        working-directory: .
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: automation-result
+          path: |
+            screenshot.png
+            page.html
+            output.json
+          retention-days: 7
+
+      # Create script.js dynamically
+      - name: Write automation script
+        run: |
+          cat > script.js << 'EOF'
+          const puppeteer = require('puppeteer');
+          const fs = require('fs');
+
+          (async () => {
+            const browser = await puppeteer.launch({ headless: true });
+            const page = await browser.newPage();
+            await page.goto(process.env.TARGET_URL, { waitUntil: 'networkidle2' });
+
+            if (process.env.ACTION === 'screenshot') {
+              await page.screenshot({ path: 'screenshot.png', fullPage: true });
+              console.log('Screenshot saved');
+            } 
+            else if (process.env.ACTION === 'scrape') {
+              const html = await page.content();
+              fs.writeFileSync('page.html', html);
+              // Extract all links
+              const links = await page.$$eval('a', anchors => anchors.map(a => a.href));
+              fs.writeFileSync('output.json', JSON.stringify({ links, title: await page.title() }, null, 2));
+              console.log('Scraped data saved');
+            }
+            else if (process.env.ACTION === 'click') {
+              // Example: click the first button and wait for navigation
+              await page.click('button');
+              await page.waitForNavigation();
+              await page.screenshot({ path: 'after_click.png' });
+              console.log('Clicked button, screenshot after click');
+            }
+
+            await browser.close();
+          })();
+          EOF
