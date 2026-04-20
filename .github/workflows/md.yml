@@ -1,0 +1,94 @@
+name: Download The Rookie S08E15
+
+on:
+  workflow_dispatch:
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq aria2
+
+      - name: Fetch magnet link from EZTV API
+        id: get_magnet
+        continue-on-error: false
+        run: |
+          API_URL="https://eztv.re/api/get-torrents?imdb_id=tt7587774&season=8&episode=15"
+          echo "Fetching from $API_URL"
+          RESPONSE=$(curl --max-time 30 -s -H "User-Agent: Mozilla/5.0" "$API_URL" || echo "{}")
+          
+          # Fallback mirror if primary fails
+          if [ "$(echo "$RESPONSE" | jq -r '.torrents // [] | length')" -eq 0 ]; then
+            echo "Primary API returned no torrents, trying fallback..."
+            RESPONSE=$(curl --max-time 30 -s -H "User-Agent: Mozilla/5.0" "https://eztvx.to/api/get-torrents?imdb_id=tt7587774&season=8&episode=15" || echo "{}")
+          fi
+          
+          # Extract magnet (prefer 1080p, then any)
+          MAGNET=$(echo "$RESPONSE" | jq -r '.torrents // [] | map(select(.quality == "1080p")) | .[0].magnet_url // ""')
+          if [ -z "$MAGNET" ] || [ "$MAGNET" = "null" ]; then
+            MAGNET=$(echo "$RESPONSE" | jq -r '.torrents // [] | .[0].magnet_url // ""')
+          fi
+          
+          if [ -z "$MAGNET" ] || [ "$MAGNET" = "null" ] || [ "$MAGNET" = "" ]; then
+            echo "status=not_found" >> $GITHUB_OUTPUT
+            echo "magnet=" >> $GITHUB_OUTPUT
+            echo "⚠️ No torrent found for The Rookie S08E15 yet."
+            exit 0
+          fi
+          
+          echo "status=found" >> $GITHUB_OUTPUT
+          echo "magnet=$MAGNET" >> $GITHUB_OUTPUT
+          echo "✅ Magnet link obtained"
+
+      - name: Download torrent
+        if: steps.get_magnet.outputs.status == 'found'
+        run: |
+          mkdir -p download
+          cd download
+          aria2c \
+            --seed-time=0 \
+            --follow-torrent=mem \
+            --max-connection-per-server=16 \
+            --split=16 \
+            --timeout=60 \
+            --retry-wait=5 \
+            --max-tries=10 \
+            --bt-tracker-timeout=120 \
+            "${{ steps.get_magnet.outputs.magnet }}"
+          
+          # Verify at least one video file exists
+          VIDEO_COUNT=$(find . -type f \( -name "*.mkv" -o -name "*.mp4" \) | wc -l)
+          if [ "$VIDEO_COUNT" -eq 0 ]; then
+            echo "❌ No video file downloaded."
+            exit 1
+          fi
+
+      - name: Organize downloaded file
+        if: steps.get_magnet.outputs.status == 'found'
+        run: |
+          cd download
+          VIDEO_FILE=$(find . -type f \( -name "*.mkv" -o -name "*.mp4" \) -exec stat -c "%s %n" {} \; | sort -nr | head -1 | cut -d' ' -f2-)
+          if [ -z "$VIDEO_FILE" ]; then
+            echo "No video file found" && exit 1
+          fi
+          mv "$VIDEO_FILE" "./The.Rookie.S08E15.1080p.WEB-DL.mkv" 2>/dev/null || \
+          mv "$VIDEO_FILE" "./The.Rookie.S08E15.1080p.WEB-DL.mp4" 2>/dev/null
+          echo "✅ Organized: $(ls -lh The.Rookie.S08E15.*)"
+
+      - name: Upload artifact
+        if: success() && steps.get_magnet.outputs.status == 'found'
+        uses: actions/upload-artifact@v4
+        with:
+          name: The.Rookie.S08E15
+          path: download/The.Rookie.S08E15.*
+          retention-days: 1
+          if-no-files-found: warn
+
+      - name: No torrent available – clean exit
+        if: steps.get_magnet.outputs.status == 'not_found'
+        run: |
+          echo "::warning::No torrent found for The Rookie S08E15 yet. The episode aired recently; try again in a day or two."
+          exit 0
