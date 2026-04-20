@@ -1,0 +1,89 @@
+name: YouTube Downloader (Cobalt API)
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'YouTube URL'
+        required: true
+        type: string
+      format:
+        description: 'video or audio'
+        required: true
+        default: 'video'
+        type: choice
+        options:
+          - video
+          - audio
+      quality:
+        description: 'For video: 720, 1080, 2160 (leave blank for best)'
+        required: false
+        type: string
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Get download link from Cobalt API
+        id: cobalt
+        run: |
+          URL="${{ inputs.video_url }}"
+          FORMAT="${{ inputs.format }}"
+          QUALITY="${{ inputs.quality }}"
+          
+          # Build JSON payload
+          if [ "$FORMAT" = "video" ]; then
+            if [ -n "$QUALITY" ]; then
+              PAYLOAD=$(jq -n --arg url "$URL" --arg vQuality "$QUALITY" '{url: $url, videoQuality: $vQuality, audioFormat: "best", isAudioOnly: false}')
+            else
+              PAYLOAD=$(jq -n --arg url "$URL" '{url: $url, videoQuality: "max", audioFormat: "best", isAudioOnly: false}')
+            fi
+          else
+            PAYLOAD=$(jq -n --arg url "$URL" '{url: $url, isAudioOnly: true, audioFormat: "mp3"}')
+          fi
+          
+          echo "Request payload: $PAYLOAD"
+          
+          # Call Cobalt API
+          RESPONSE=$(curl -s -X POST \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "https://api.cobalt.tools/api/json")
+          
+          echo "API response: $RESPONSE"
+          
+          # Extract status and download URL
+          STATUS=$(echo "$RESPONSE" | jq -r '.status')
+          if [ "$STATUS" != "200" ] && [ "$STATUS" != "redirect" ]; then
+            ERROR=$(echo "$RESPONSE" | jq -r '.text // "Unknown error"')
+            echo "Cobalt API error: $ERROR"
+            exit 1
+          fi
+          
+          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.url')
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            echo "No download URL returned"
+            exit 1
+          fi
+          
+          echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
+          
+          # Get filename from URL or use default
+          FILENAME="downloaded.${FORMAT == 'video' && 'mp4' || 'mp3'}"
+          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
+
+      - name: Download file
+        run: |
+          curl -L -o "${{ env.FILENAME }}" "${{ env.DOWNLOAD_URL }}"
+          ls -la
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-download
+          path: ${{ env.FILENAME }}
+          retention-days: 90
