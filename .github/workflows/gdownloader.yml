@@ -1,10 +1,10 @@
-name: Mirror Website (Fully Offline)V3
+name: Mirror Website (Fully Offline)V4
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'Website URL (e.g., https://example.com)'
+        description: 'Website URL (e.g., https://opensim.io)'
         required: true
         type: string
       depth:
@@ -24,41 +24,23 @@ jobs:
         run: |
           URL="${{ inputs.url }}"
           DEPTH="${{ inputs.depth }}"
-          DOMAIN=$(echo "$URL" | awk -F/ '{print $3}')
-          
-          # Create output directory
+
           mkdir -p website_mirror
           cd website_mirror
-          
-          # Run httrack with options:
-          # - %v : verbose
-          # - %p : prompt (no interactive)
-          # - %r : stay on the same domain (but also fetch external CSS/images if needed)
-          # - %d : depth
-          # - %N : non-stop (ignore errors)
-          # - %e : email (none)
-          # - %s : scripts (download linked scripts)
-          # - %u : update (no)
-          # - %I : images (download all)
-          # - %c : cache (no)
-          # - %F : get files (all types)
-          # - %P : save to current directory
-          httrack "$URL" -O "./" \
+
+          httrack "$URL" -O . \
             --depth=$DEPTH \
             --mirror \
             --robots=0 \
             --stay-on-same-domain \
             --ext-depth=2 \
-            --can-go-down-and-up \
+            --can-go-up-and-down \
             --verbose \
-            --keep-session \
-            --enable-gzip \
             --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-          
-          # HTTrack creates a folder like "example.com". Move contents up
-          SUBDIR=$(find . -maxdepth 1 -type d -name "*.*" | head -1)
+
+          SUBDIR=$(find . -maxdepth 1 -type d -name "*.*" | grep -v "^\.$" | head -1)
           if [ -n "$SUBDIR" ] && [ "$SUBDIR" != "." ]; then
-            mv "$SUBDIR"/* ./
+            mv "$SUBDIR"/* ./ 2>/dev/null || true
             rm -rf "$SUBDIR"
           fi
 
