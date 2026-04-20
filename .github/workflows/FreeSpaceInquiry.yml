@@ -1,9 +1,16 @@
-      - name: Save disk info to file
-        run: df -h / > disk_space.txt
+name: Check Free Disk Space
 
-      - name: Upload log
-        uses: actions/upload-artifact@v4
-        with:
-          name: disk-space-log
-          path: disk_space.txt
-          retention-days: 1
+on:
+  workflow_dispatch:    # manual trigger only
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show available disk space
+        run: |
+          echo "=== Free disk space on runner ==="
+          df -h /
+          echo ""
+          echo "=== Summary ==="
+          df -h / | awk 'NR==2 {print "Free: " $4 " / " $2 " total (" $5 " used)"}'
