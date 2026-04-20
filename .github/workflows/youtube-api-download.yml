@@ -1,54 +1,24 @@
-name: YouTube Downloader (FlashDL)
+name: YouTube Downloader (Proxy)
 
 on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: 'YouTube Video URL'
+        description: 'YouTube URL'
         required: true
         type: string
-      format:
-        description: 'video (mp4) or audio (mp3)'
-        required: true
-        default: 'video'
-        type: choice
-        options:
-          - video
-          - audio
 
 jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Get download link from FlashDL
-        id: get_url
+      - name: Download via proxy
         run: |
           URL="${{ inputs.video_url }}"
-          FORMAT="${{ inputs.format }}"
-          # FlashDL API endpoint (free, no key)
-          RESPONSE=$(curl -s "https://api.flashdl.one/download?url=$URL&format=$FORMAT")
-          echo "API Response: $RESPONSE"
-          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.downloadUrl')
-          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
-            echo "FlashDL failed. Response: $RESPONSE"
-            exit 1
-          fi
-          echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
-          TITLE=$(echo "$RESPONSE" | jq -r '.title // "youtube_video"')
-          echo "TITLE=$TITLE" >> $GITHUB_ENV
-
-      - name: Download file
-        run: |
-          EXT="${{ inputs.format == 'video' && 'mp4' || 'mp3' }}"
-          curl -L -o "${{ env.TITLE }}.$EXT" "${{ env.DOWNLOAD_URL }}"
-          echo "FILE=${{ env.TITLE }}.$EXT" >> $GITHUB_ENV
-
-      - name: Upload artifact
+          # Public proxy that returns direct download link
+          curl -L "https://yt-downloader.deno.dev/download?url=$URL" -o video.mp4
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: youtube-download
-          path: ${{ env.FILE }}
-          retention-days: 90
+          path: video.mp4
