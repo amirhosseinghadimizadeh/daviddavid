@@ -1,23 +1,15 @@
-name: Live Site Automation
+name: Open URL and Screenshot
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'Target URL'
+        description: 'Website URL (e.g., https://example.com)'
         required: true
         type: string
-      action:
-        description: 'Action: screenshot, scrape, or click'
-        default: 'screenshot'
-        type: choice
-        options:
-          - screenshot
-          - scrape
-          - click
 
 jobs:
-  automate:
+  screenshot:
     runs-on: ubuntu-latest
     steps:
       - name: Setup Node.js
@@ -28,54 +20,38 @@ jobs:
       - name: Install Puppeteer
         run: npm install puppeteer
 
-      - name: Run browser automation
-        run: node script.js
-        env:
-          TARGET_URL: ${{ inputs.url }}
-          ACTION: ${{ inputs.action }}
-        working-directory: .
-      - name: Upload result
+      - name: Create screenshot script
+        run: |
+          cat > take-screenshot.mjs << 'EOF'
+          import puppeteer from 'puppeteer';
+          import { existsSync, mkdirSync } from 'fs';
+
+          const url = process.argv[2];
+          if (!url) {
+            console.error('No URL provided');
+            process.exit(1);
+          }
+
+          console.log(`Launching browser...`);
+          const browser = await puppeteer.launch({ headless: true });
+          const page = await browser.newPage();
+          
+          console.log(`Navigating to ${url}...`);
+          await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+          
+          console.log(`Taking full-page screenshot...`);
+          await page.screenshot({ path: 'screenshot.png', fullPage: true });
+          
+          await browser.close();
+          console.log('Done. Screenshot saved as screenshot.png');
+          EOF
+
+      - name: Run screenshot
+        run: node take-screenshot.mjs "${{ inputs.url }}"
+
+      - name: Upload screenshot
         uses: actions/upload-artifact@v4
         with:
-          name: automation-result
-          path: |
-            screenshot.png
-            page.html
-            output.json
+          name: webpage-screenshot
+          path: screenshot.png
           retention-days: 7
-
-      # Create script.js dynamically
-      - name: Write automation script
-        run: |
-          cat > script.js << 'EOF'
-          const puppeteer = require('puppeteer');
-          const fs = require('fs');
-
-          (async () => {
-            const browser = await puppeteer.launch({ headless: true });
-            const page = await browser.newPage();
-            await page.goto(process.env.TARGET_URL, { waitUntil: 'networkidle2' });
-
-            if (process.env.ACTION === 'screenshot') {
-              await page.screenshot({ path: 'screenshot.png', fullPage: true });
-              console.log('Screenshot saved');
-            } 
-            else if (process.env.ACTION === 'scrape') {
-              const html = await page.content();
-              fs.writeFileSync('page.html', html);
-              // Extract all links
-              const links = await page.$$eval('a', anchors => anchors.map(a => a.href));
-              fs.writeFileSync('output.json', JSON.stringify({ links, title: await page.title() }, null, 2));
-              console.log('Scraped data saved');
-            }
-            else if (process.env.ACTION === 'click') {
-              // Example: click the first button and wait for navigation
-              await page.click('button');
-              await page.waitForNavigation();
-              await page.screenshot({ path: 'after_click.png' });
-              console.log('Clicked button, screenshot after click');
-            }
-
-            await browser.close();
-          })();
-          EOF
