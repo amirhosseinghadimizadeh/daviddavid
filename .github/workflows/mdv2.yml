@@ -1,211 +1,24 @@
-name: Search and Download The Rookie S08E15
+name: Download The Rookie S08E15
 
 on:
   workflow_dispatch:
-    inputs:
-      query:
-        description: 'Search query (e.g., "The Rookie S08E15" 1080p)'
-        required: true
-        default: '"The Rookie S08E15" 1080p'
-      custom_proxy:
-        description: 'Optional custom proxy URL (leave empty for auto)'
-        required: false
-        default: ''
 
 jobs:
-  search_and_download:
+  download:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # plenty for large file
     steps:
-      - name: Install tools
+      - name: Install aria2
+        run: sudo apt-get update && sudo apt-get install -y aria2
+
+      - name: Download torrent
         run: |
-          sudo apt-get update
-          sudo apt-get install -y aria2 jq curl
-          pip3 install --quiet requests beautifulsoup4
+          mkdir download && cd download
+          aria2c --seed-time=0 --follow-torrent=mem \
+            'magnet:?xt=urn:btih:CFAF309D09BE06AFEC7116A5AB6CAF0DBF8FB46D&dn=The+Rookie+S08E15+1080p+AMZN+WEB-DL+DDP5+1+H+264-NTb&tr=http%3A%2F%2Fp4p.arenabg.com%3A1337%2Fannounce&tr=udp%3A%2F%2F47.ip-51-68-199.eu%3A6969%2Fannounce&tr=udp%3A%2F%2F9.rarbg.me%3A2780%2Fannounce&tr=udp%3A%2F%2F9.rarbg.to%3A2710%2Fannounce&tr=udp%3A%2F%2F9.rarbg.to%3A2730%2Fannounce&tr=udp%3A%2F%2F9.rarbg.to%3A2920%2Fannounce&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Fopentracker.i2p.rocks%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.cyberia.is%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.internetwarriors.net%3A1337%2Fannounce&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Ftracker.pirateparty.gr%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.tiny-vps.com%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce'
 
-      - name: Search Pirate Bay and extract magnets
-        id: search
-        env:
-          QUERY: ${{ inputs.query }}
-          CUSTOM_PROXY: ${{ inputs.custom_proxy }}
-        run: |
-          python3 << 'PYTHON_SCRIPT'
-          import requests, urllib.parse, sys, time, os, re
-          from bs4 import BeautifulSoup
-
-          query = os.environ.get('QUERY', '').strip()
-          custom = os.environ.get('CUSTOM_PROXY', '').strip()
-          if not query:
-              print("::error::No search query provided")
-              sys.exit(1)
-
-          # Proxies that actually work from GitHub runners (2026)
-          PROXY_LIST = [
-              "https://pirateproxy-bay.com",
-              "https://thepiratebay10.org",
-              "https://tpbproxy.com",
-              "https://piratebayproxy.info",
-              "https://pirateproxy.live",
-              "https://thehiddenbay.com",
-          ]
-          if custom:
-              PROXY_LIST.insert(0, custom.rstrip('/'))
-
-          headers = {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-              'Accept': 'text/html,application/xhtml+xml'
-          }
-          session = requests.Session()
-          session.headers.update(headers)
-
-          # Find working proxy
-          search_url = None
-          for proxy in PROXY_LIST:
-              url = f"{proxy}/search/{urllib.parse.quote(query)}/0/7/0"
-              try:
-                  r = session.get(url, timeout=15)
-                  if r.status_code == 200 and 'cloudflare' not in r.text.lower():
-                      search_url = url
-                      print(f"✅ Using proxy: {proxy}")
-                      break
-              except Exception:
-                  continue
-              time.sleep(0.5)
-
-          if not search_url:
-              print("::warning::No working proxy found. Torrent may not be available yet.")
-              # Write empty file so later steps skip gracefully
-              with open('magnets.txt', 'w') as f:
-                  f.write("")
-              sys.exit(0)
-
-          # Fetch search results
-          resp = session.get(search_url, timeout=30)
-          soup = BeautifulSoup(resp.text, 'html.parser')
-          table = soup.find('table', id='searchResult') or soup.find('table', class_='table') or soup.find('table')
-          if not table:
-              print("::warning::No torrent table found on page.")
-              with open('magnets.txt', 'w') as f:
-                  f.write("")
-              sys.exit(0)
-
-          rows = table.find_all('tr')
-          magnets = []
-          for row in rows[1:]:  # skip header
-              cells = row.find_all('td')
-              if len(cells) < 2:
-                  continue
-              title_cell = cells[0]
-              link = title_cell.find('a', class_='detLink') or title_cell.find('a')
-              if not link:
-                  continue
-              title = link.get_text(strip=True)
-              # find magnet in any <a> tag
-              magnet = None
-              for a in row.find_all('a', href=True):
-                  if a['href'].startswith('magnet:'):
-                      magnet = a['href']
-                      break
-              if magnet:
-                  magnets.append((title, magnet))
-
-          if not magnets:
-              print("::warning::No magnet links found. Episode may be too new.")
-              with open('magnets.txt', 'w') as f:
-                  f.write("")
-              sys.exit(0)
-
-          with open('magnets.txt', 'w', encoding='utf-8') as f:
-              for title, mag in magnets:
-                  f.write(f"{title}\n{mag}\n---\n")
-          print(f"Found {len(magnets)} magnet(s)")
-          PYTHON_SCRIPT
-
-      - name: Select best magnet (1080p NTb priority)
-        id: best
-        if: success() && hashFiles('magnets.txt') != ''
-        run: |
-          # If magnets.txt is empty, skip selection
-          if [ ! -s magnets.txt ]; then
-              echo "best_magnet=" >> $GITHUB_OUTPUT
-              echo "::warning::No magnets to select"
-              exit 0
-          fi
-
-          BEST_MAGNET=""
-          BEST_SCORE=-1
-          # Read the file in chunks (title line, magnet line, separator)
-          while IFS= read -r line; do
-              if [[ "$line" =~ ^magnet: ]]; then
-                  MAGNET="$line"
-                  # Get previous line (title) - simple but safe
-                  TITLE=$(awk -v m="$MAGNET" '$0==m {print prev} {prev=$0}' magnets.txt)
-                  SCORE=0
-                  # Prioritize 1080p, then NTb, then REPACK, then x265, then 720p
-                  [[ "$TITLE" =~ 1080p ]] && SCORE=$((SCORE + 100))
-                  [[ "$TITLE" =~ NTb ]] && SCORE=$((SCORE + 50))
-                  [[ "$TITLE" =~ REPACK ]] && SCORE=$((SCORE + 20))
-                  [[ "$TITLE" =~ x265 ]] && SCORE=$((SCORE + 10))
-                  [[ "$TITLE" =~ 720p ]] && SCORE=$((SCORE + 5))
-                  if [ $SCORE -gt $BEST_SCORE ]; then
-                      BEST_SCORE=$SCORE
-                      BEST_MAGNET="$MAGNET"
-                  fi
-              fi
-          done < magnets.txt
-
-          if [ -z "$BEST_MAGNET" ]; then
-              echo "::warning::No valid magnet found after scoring"
-              echo "best_magnet=" >> $GITHUB_OUTPUT
-              exit 0
-          fi
-
-          echo "best_magnet=$BEST_MAGNET" >> $GITHUB_OUTPUT
-          echo "Selected magnet with score $BEST_SCORE"
-
-      - name: Download torrent with aria2
-        if: steps.best.outputs.best_magnet != ''
-        run: |
-          mkdir -p download
-          cd download
-          # aria2 with robust settings for GitHub runners
-          aria2c \
-            --seed-time=0 \
-            --follow-torrent=mem \
-            --max-connection-per-server=16 \
-            --split=16 \
-            --timeout=60 \
-            --retry-wait=5 \
-            --max-tries=10 \
-            --bt-tracker-timeout=120 \
-            --console-log-level=error \
-            "${{ steps.best.outputs.best_magnet }}"
-
-      - name: Organize video file
-        if: steps.best.outputs.best_magnet != ''
-        run: |
-          cd download
-          # Find the largest video file (should be the episode)
-          VIDEO=$(find . -type f \( -name "*.mkv" -o -name "*.mp4" \) -exec stat -c "%s %n" {} \; | sort -nr | head -1 | cut -d' ' -f2-)
-          if [ -z "$VIDEO" ]; then
-              echo "::error::No video file found after download"
-              exit 1
-          fi
-          # Clean name
-          mv "$VIDEO" "./The.Rookie.S08E15.mkv" 2>/dev/null || mv "$VIDEO" "./The.Rookie.S08E15.mp4"
-          echo "✅ Downloaded: $(ls -lh The.Rookie.S08E15.*)"
-
-      - name: Upload artifact (1‑day retention)
-        if: steps.best.outputs.best_magnet != '' && success()
+      - name: Upload video
         uses: actions/upload-artifact@v4
         with:
           name: The.Rookie.S08E15
-          path: download/The.Rookie.S08E15.*
+          path: download/
           retention-days: 1
-          if-no-files-found: error
-
-      - name: Clean exit when no torrent available
-        if: steps.best.outputs.best_magnet == '' && success()
-        run: |
-          echo "::warning::No suitable torrent found. The episode might be too new. Try again in a day or two."
-          exit 0
