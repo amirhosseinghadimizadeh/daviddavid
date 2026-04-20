@@ -1,4 +1,4 @@
-name: Download Full Website (Offline Ready)
+name: Mirror Website (Fully Offline)V2
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       depth:
-        description: 'Maximum link depth (1-5)'
+        description: 'Maximum link depth (3-5)'
         required: false
         default: '3'
         type: string
@@ -17,39 +17,57 @@ jobs:
   mirror:
     runs-on: ubuntu-latest
     steps:
-      - name: Create output folder
-        run: mkdir -p website_mirror
+      - name: Install HTTrack
+        run: sudo apt-get update && sudo apt-get install -y httrack
 
-      - name: Download everything with wget
+      - name: Mirror website with HTTrack
         run: |
-          cd website_mirror
           URL="${{ inputs.url }}"
           DEPTH="${{ inputs.depth }}"
           DOMAIN=$(echo "$URL" | awk -F/ '{print $3}')
-
-          wget \
-            --recursive \
-            --level=$DEPTH \
-            --no-clobber \
-            --page-requisites \
-            --adjust-extension \
-            --convert-links \
-            --restrict-file-names=windows \
-            --domains=$DOMAIN \
-            --no-parent \
-            --wait=1 \
-            --random-wait \
-            --limit-rate=500k \
-            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-            --accept="*.html,*.htm,*.css,*.js,*.jpg,*.jpeg,*.png,*.gif,*.svg,*.webp,*.mp4,*.webm,*.ogg,*.mp3,*.wav,*.woff,*.woff2,*.ttf,*.eot,*.ico,*.pdf" \
-            "$URL"
+          
+          # Create output directory
+          mkdir -p website_mirror
+          cd website_mirror
+          
+          # Run httrack with options:
+          # - %v : verbose
+          # - %p : prompt (no interactive)
+          # - %r : stay on the same domain (but also fetch external CSS/images if needed)
+          # - %d : depth
+          # - %N : non-stop (ignore errors)
+          # - %e : email (none)
+          # - %s : scripts (download linked scripts)
+          # - %u : update (no)
+          # - %I : images (download all)
+          # - %c : cache (no)
+          # - %F : get files (all types)
+          # - %P : save to current directory
+          httrack "$URL" -O "./" \
+            --depth=$DEPTH \
+            --mirror \
+            --robots=0 \
+            --stay-on-same-domain \
+            --ext-depth=2 \
+            --can-go-down-and-up \
+            --verbose \
+            --keep-session \
+            --enable-gzip \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          
+          # HTTrack creates a folder like "example.com". Move contents up
+          SUBDIR=$(find . -maxdepth 1 -type d -name "*.*" | head -1)
+          if [ -n "$SUBDIR" ] && [ "$SUBDIR" != "." ]; then
+            mv "$SUBDIR"/* ./
+            rm -rf "$SUBDIR"
+          fi
 
       - name: Compress into ZIP
-        run: zip -r website_mirror.zip website_mirror/
+        run: zip -r website_offline.zip website_mirror/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: website-mirror
-          path: website_mirror.zip
+          name: website-offline
+          path: website_offline.zip
           retention-days: 7
