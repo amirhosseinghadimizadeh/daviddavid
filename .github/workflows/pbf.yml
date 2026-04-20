@@ -1,0 +1,100 @@
+name: Search bpp
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: 'Search query (e.g., "ubuntu 22.04")'
+        required: true
+        type: string
+      proxy_url:
+        description: 'Pirate Bay proxy URL (default: https://pirateproxy-bay.com)'
+        required: false
+        default: 'https://pirateproxy-bay.com'
+        type: string
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Python dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Scrape search results
+        run: |
+          python3 << 'EOF'
+          import requests
+          from bs4 import BeautifulSoup
+          import urllib.parse
+          import sys
+
+          query = "${{ inputs.query }}"
+          proxy_base = "${{ inputs.proxy_url }}".rstrip('/')
+          search_url = f"{proxy_base}/search/{urllib.parse.quote(query)}/0/7/0"
+          headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          }
+
+          print(f"Fetching {search_url}")
+          try:
+              resp = requests.get(search_url, headers=headers, timeout=30)
+              resp.raise_for_status()
+          except Exception as e:
+              print(f"Failed: {e}")
+              sys.exit(1)
+
+          soup = BeautifulSoup(resp.text, 'html.parser')
+          table = soup.find('table', id='searchResult')
+          if not table:
+              table = soup.find('table')
+          if not table:
+              print("No results table found.")
+              sys.exit(1)
+
+          rows = table.find_all('tr')[1:]  # skip header
+          if not rows:
+              print("No results.")
+              sys.exit(0)
+
+          with open('results.txt', 'w', encoding='utf-8') as f:
+              f.write(f"Search: {query}\nProxy: {proxy_base}\n{'='*60}\n\n")
+              count = 0
+              for idx, row in enumerate(rows, 1):
+                  # Extract name
+                  name_cell = row.find('td')
+                  if not name_cell:
+                      continue
+                  name_link = name_cell.find('a', class_='detLink')
+                  if not name_link:
+                      name_link = name_cell.find('a')
+                  if not name_link:
+                      continue
+                  name = name_link.get_text(strip=True)
+
+                  # Extract magnet
+                  magnet = None
+                  for a in row.find_all('a', href=True):
+                      if a['href'].startswith('magnet:'):
+                          magnet = a['href']
+                          break
+
+                  # Extract size (3rd td)
+                  cells = row.find_all('td')
+                  size = cells[2].get_text(strip=True) if len(cells) > 2 else "?"
+
+                  if magnet:
+                      f.write(f"{idx}. {name}\n   Size: {size}\n   Magnet: {magnet}\n\n")
+                      count += 1
+                  else:
+                      f.write(f"{idx}. {name}\n   Size: {size}\n   Magnet: not available\n\n")
+
+              f.write(f"Total results with magnet: {count}\n")
+
+          print(f"Saved results to results.txt")
+          EOF
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: tpb-search-results
+          path: results.txt
+          retention-days: 1
