@@ -1,14 +1,14 @@
-name: YouTube Downloader (April 2026)
+name: YouTube Downloader (FlashDL API)
 
 on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: 'YouTube Video URL'
+        description: 'YouTube URL'
         required: true
         type: string
       format:
-        description: 'Format to download'
+        description: 'video (mp4) or audio (mp3)'
         required: true
         default: 'video'
         type: choice
@@ -20,68 +20,35 @@ jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      # Step 1: Install the latest yt-dlp nightly and ffmpeg
-      - name: Install yt-dlp and dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-          pip install --upgrade yt-dlp
-      
-      # Step 2: Attempt download with a client fallback strategy
-      - name: Download Media with Client Fallback
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Get download link from FlashDL API
+        id: get_link
         run: |
           URL="${{ inputs.video_url }}"
           FORMAT="${{ inputs.format }}"
-
-          # Define an array of clients to try, from most to least likely to work
-          clients=("web_safari" "ios" "android" "tv")
-
-          for client in "${clients[@]}"; do
-            echo "Trying client: $client"
-
-            if [ "$FORMAT" = "video" ]; then
-              if yt-dlp --force-ipv4 \
-                --extractor-args "youtube:player_client=$client" \
-                -f "best[ext=mp4]/best" \
-                -o "%(title)s.%(ext)s" \
-                "$URL"; then
-                echo "Download successful with client: $client"
-                exit 0
-              fi
-            else
-              if yt-dlp --force-ipv4 \
-                --extractor-args "youtube:player_client=$client" \
-                -f "bestaudio" \
-                --extract-audio --audio-format mp3 \
-                -o "%(title)s.%(ext)s" \
-                "$URL"; then
-                echo "Download successful with client: $client"
-                exit 0
-              fi
-            fi
-          done
-
-          echo "All clients failed. Attempting browser impersonation as a final fallback."
-
-          if [ "$FORMAT" = "video" ]; then
-            yt-dlp --force-ipv4 \
-              --impersonate chrome \
-              -f "best[ext=mp4]/best" \
-              -o "%(title)s.%(ext)s" \
-              "$URL"
-          else
-            yt-dlp --force-ipv4 \
-              --impersonate chrome \
-              -f "bestaudio" \
-              --extract-audio --audio-format mp3 \
-              -o "%(title)s.%(ext)s" \
-              "$URL"
+          # FlashDL endpoint: https://api.flashdl.one/download?url=...&format=mp4 (or mp3)
+          RESPONSE=$(curl -s "https://api.flashdl.one/download?url=$URL&format=$FORMAT")
+          # API returns JSON with "downloadUrl" field
+          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.downloadUrl')
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            echo "Failed to get download URL. Response: $RESPONSE"
+            exit 1
           fi
+          echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
+          TITLE=$(echo "$RESPONSE" | jq -r '.title // "youtube_video"')
+          echo "TITLE=$TITLE" >> $GITHUB_ENV
 
-      # Step 3: Upload the downloaded file as an artifact
-      - name: Upload Artifact
+      - name: Download file
+        run: |
+          EXT="${{ inputs.format == 'video' && 'mp4' || 'mp3' }}"
+          curl -L -o "${{ env.TITLE }}.$EXT" "${{ env.DOWNLOAD_URL }}"
+          echo "FILE_NAME=${{ env.TITLE }}.$EXT" >> $GITHUB_ENV
+
+      - name: Upload as artifact
         uses: actions/upload-artifact@v4
         with:
           name: youtube-download
-          path: ./*.mp4
-          if-no-files-found: error
+          path: ${{ env.FILE_NAME }}
+          retention-days: 90
