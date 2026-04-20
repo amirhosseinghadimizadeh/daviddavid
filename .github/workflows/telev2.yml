@@ -1,0 +1,243 @@
+name: Telegram Multi-Channel Scraper V2 (All Media)
+
+on:
+  workflow_dispatch:
+    inputs:
+      channels:
+        description: 'Channel usernames (comma-separated, no @). Example: durov,telegram,nytimes'
+        required: true
+        type: string
+      posts_per_channel:
+        description: 'Number of posts to scrape per channel'
+        required: false
+        default: '20'
+        type: string
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Scrape multiple channels
+        env:
+          CHANNELS: ${{ inputs.channels }}
+          LIMIT: ${{ inputs.posts_per_channel }}
+        run: |
+          python3 << 'EOF'
+          import os, re, json, time, requests, html
+          from bs4 import BeautifulSoup
+          from pathlib import Path
+
+          channels = [c.strip() for c in os.environ['CHANNELS'].split(',')]
+          limit = int(os.environ['LIMIT'])
+
+          output_dir = "telegram_report"
+          Path(output_dir).mkdir(exist_ok=True)
+          images_dir = Path(output_dir) / "images"
+          videos_dir = Path(output_dir) / "videos"
+          docs_dir = Path(output_dir) / "documents"
+          images_dir.mkdir(exist_ok=True)
+          videos_dir.mkdir(exist_ok=True)
+          docs_dir.mkdir(exist_ok=True)
+
+          all_posts = []
+
+          for channel in channels:
+              print(f"\n📡 Scraping @{channel} ...")
+              try:
+                  resp = requests.get(f"https://t.me/s/{channel}", timeout=30)
+                  resp.raise_for_status()
+              except Exception as e:
+                  print(f"❌ Failed to fetch {channel}: {e}")
+                  continue
+
+              soup = BeautifulSoup(resp.text, "html.parser")
+              messages = soup.select(".tgme_widget_message")[:limit]
+              print(f"   Found {len(messages)} messages.")
+
+              for idx, msg in enumerate(messages):
+                  text_div = msg.select_one(".tgme_widget_message_text")
+                  text = text_div.get_text(strip=True) if text_div else ""
+
+                  date_tag = msg.select_one("time")
+                  date = date_tag.get("datetime") if date_tag else ""
+
+                  views_span = msg.select_one(".tgme_widget_message_views")
+                  views_str = views_span.get_text(strip=True) if views_span else "0"
+                  views_raw = views_str.replace(',', '')
+                  if 'K' in views_raw:
+                      views_num = float(views_raw.replace('K', '')) * 1000
+                  elif 'M' in views_raw:
+                      views_num = float(views_raw.replace('M', '')) * 1000000
+                  else:
+                      views_num = int(views_raw) if views_raw.isdigit() else 0
+
+                  # Images
+                  img_tags = msg.select(".tgme_widget_message_photo img")
+                  downloaded_images = []
+                  for img in img_tags:
+                      src = img.get("src")
+                      if src:
+                          try:
+                              img_resp = requests.get(src, stream=True, timeout=15)
+                              if img_resp.status_code == 200:
+                                  fname = f"{channel}_{idx}_{int(time.time()*1000)}.jpg"
+                                  with open(images_dir / fname, "wb") as f:
+                                      for chunk in img_resp.iter_content(1024):
+                                          f.write(chunk)
+                                  downloaded_images.append(fname)
+                          except Exception as e:
+                              print(f"      Image download failed: {e}")
+
+                  # Videos
+                  video_tags = msg.select(".tgme_widget_message_video video")
+                  downloaded_videos = []
+                  for vid in video_tags:
+                      src = vid.get("src")
+                      if src:
+                          try:
+                              vid_resp = requests.get(src, stream=True, timeout=30)
+                              if vid_resp.status_code == 200:
+                                  fname = f"{channel}_{idx}_{int(time.time()*1000)}.mp4"
+                                  with open(videos_dir / fname, "wb") as f:
+                                      for chunk in vid_resp.iter_content(8192):
+                                          f.write(chunk)
+                                  downloaded_videos.append(fname)
+                          except Exception as e:
+                              print(f"      Video download failed: {e}")
+
+                  # Documents
+                  doc_links = msg.select("a.tgme_widget_message_document")
+                  downloaded_docs = []
+                  for a in doc_links:
+                      href = a.get("href")
+                      if href:
+                          try:
+                              title_elem = a.select_one(".tgme_widget_message_document_title")
+                              doc_name = title_elem.get_text(strip=True) if title_elem else "document"
+                              doc_name = re.sub(r'[\\/*?:"<>|]', '_', doc_name)
+                              fname = f"{channel}_{idx}_{doc_name}"
+                              doc_resp = requests.get(href, stream=True, timeout=60)
+                              if doc_resp.status_code == 200:
+                                  with open(docs_dir / fname, "wb") as f:
+                                      for chunk in doc_resp.iter_content(8192):
+                                          f.write(chunk)
+                                  downloaded_docs.append(fname)
+                          except Exception as e:
+                              print(f"      Document download failed: {e}")
+
+                  all_posts.append({
+                      "channel": channel,
+                      "text": text,
+                      "date": date,
+                      "views_str": views_str,
+                      "views_num": views_num,
+                      "images": downloaded_images,
+                      "videos": downloaded_videos,
+                      "documents": downloaded_docs
+                  })
+
+          # Save JSON
+          with open(f"{output_dir}/posts.json", "w", encoding="utf-8") as f:
+              json.dump(all_posts, f, indent=2, ensure_ascii=False)
+
+          # Build HTML safely without any ${{ sequences
+          unique_channels = sorted(set(p["channel"] for p in all_posts))
+          channel_options = "".join(f'<option value="{c}">@{c}</option>' for c in unique_channels)
+
+          # We'll generate the HTML using a template and .replace to avoid ${{ in the source
+          template = """
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <meta charset="UTF-8">
+              <title>Telegram Multi-Channel Report (All Media)</title>
+              <style>
+                  body { font-family: Arial, sans-serif; background: #f0f2f5; margin: 0; padding: 20px; }
+                  .container { max-width: 1200px; margin: auto; }
+                  h1 { color: #1e6f3f; }
+                  .controls { background: white; padding: 15px; border-radius: 10px; margin-bottom: 20px; display: flex; gap: 15px; flex-wrap: wrap; }
+                  .post { background: white; border-radius: 12px; margin-bottom: 20px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+                  .channel-badge { background: #2c974b; color: white; display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; margin-bottom: 12px; }
+                  .date, .views { color: #666; font-size: 0.85rem; margin-bottom: 8px; }
+                  .message-text { margin: 15px 0; white-space: pre-wrap; }
+                  .media-section { margin-top: 15px; }
+                  .media-section h4 { margin: 10px 0 5px; color: #333; }
+                  .images img { max-width: 200px; max-height: 200px; border-radius: 8px; margin: 5px; cursor: pointer; }
+                  video { max-width: 300px; margin: 5px; border-radius: 8px; }
+                  .doc-link { display: inline-block; background: #f0f0f0; padding: 5px 10px; margin: 5px; border-radius: 6px; text-decoration: none; color: #065fd4; }
+                  .footer { text-align: center; margin-top: 30px; color: #666; }
+              </style>
+          </head>
+          <body>
+          <div class="container">
+              <h1>📡 Telegram Multi-Channel Scraper (All Media)</h1>
+              <div class="controls">
+                  <select id="channelFilter">
+                      <option value="all">All channels</option>
+                      __CHANNEL_OPTIONS__
+                  </select>
+                  <select id="sortBy">
+                      <option value="date">Date (newest)</option>
+                      <option value="views">Views (most)</option>
+                  </select>
+                  <input type="text" id="searchInput" placeholder="Search text...">
+              </div>
+              <div id="postsContainer"></div>
+              <div class="footer">Generated on __DATE__ · __POST_COUNT__ posts</div>
+          </div>
+          <script>
+              const postsData = __POSTS_DATA__;
+              function render() {
+                  let channel = document.getElementById('channelFilter').value;
+                  let sortBy = document.getElementById('sortBy').value;
+                  let search = document.getElementById('searchInput').value.toLowerCase();
+                  let filtered = postsData.filter(p => (channel === 'all' || p.channel === channel) && (!search || p.text.toLowerCase().includes(search)));
+                  if (sortBy === 'date') filtered.sort((a,b) => new Date(b.date) - new Date(a.date));
+                  else if (sortBy === 'views') filtered.sort((a,b) => b.views_num - a.views_num);
+                  let container = document.getElementById('postsContainer');
+                  if (!filtered.length) { container.innerHTML = '<div class="post">No posts match.</div>'; return; }
+                  let html = '';
+                  for (let p of filtered) {
+                      let imagesHtml = p.images.length ? '<div class="media-section"><h4>📸 Images:</h4><div class="images">' + p.images.map(i => `<img src="images/${i}" onclick="window.open(this.src)">`).join('') + '</div></div>' : '';
+                      let videosHtml = p.videos.length ? '<div class="media-section"><h4>🎬 Videos:</h4>' + p.videos.map(v => `<video controls src="videos/${v}" preload="metadata"></video>`).join('') + '</div>' : '';
+                      let docsHtml = p.documents.length ? '<div class="media-section"><h4>📎 Documents:</h4>' + p.documents.map(d => `<a class="doc-link" href="documents/${d}" download>📄 ${d.split('_').slice(2).join('_')}</a>`).join('') + '</div>' : '';
+                      html += `<div class="post">
+                          <div class="channel-badge">@${p.channel}</div>
+                          <div class="date">📅 ${p.date}</div>
+                          <div class="views">👁️ ${p.views_str} views</div>
+                          <div class="message-text">${p.text.replace(/\\n/g, '<br>')}</div>
+                          ${imagesHtml}${videosHtml}${docsHtml}
+                      </div>`;
+                  }
+                  container.innerHTML = html;
+              }
+              document.getElementById('channelFilter').addEventListener('change', render);
+              document.getElementById('sortBy').addEventListener('change', render);
+              document.getElementById('searchInput').addEventListener('input', render);
+              render();
+          </script>
+          </body>
+          </html>
+          """
+
+          # Replace placeholders
+          html_content = template.replace("__CHANNEL_OPTIONS__", channel_options)
+          html_content = html_content.replace("__DATE__", time.strftime('%Y-%m-%d %H:%M:%S UTC'))
+          html_content = html_content.replace("__POST_COUNT__", str(len(all_posts)))
+          html_content = html_content.replace("__POSTS_DATA__", json.dumps(all_posts, ensure_ascii=False))
+
+          with open(f"{output_dir}/report.html", "w", encoding="utf-8") as f:
+              f.write(html_content)
+
+          print(f"\n✅ Scraping complete. Report saved in {output_dir}/report.html")
+          EOF
+
+      - name: Upload HTML report and all media
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-multi-report-all-media
+          path: telegram_report/
+          retention-days: 7
