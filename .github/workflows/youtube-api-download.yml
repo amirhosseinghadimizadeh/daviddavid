@@ -1,10 +1,10 @@
-name: YouTube Downloader (FlashDL API)
+name: YouTube Downloader (FlashDL)
 
 on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: 'YouTube URL'
+        description: 'YouTube Video URL'
         required: true
         type: string
       format:
@@ -23,17 +23,17 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Get download link from FlashDL API
-        id: get_link
+      - name: Get download link from FlashDL
+        id: get_url
         run: |
           URL="${{ inputs.video_url }}"
           FORMAT="${{ inputs.format }}"
-          # FlashDL endpoint: https://api.flashdl.one/download?url=...&format=mp4 (or mp3)
+          # FlashDL API endpoint (free, no key)
           RESPONSE=$(curl -s "https://api.flashdl.one/download?url=$URL&format=$FORMAT")
-          # API returns JSON with "downloadUrl" field
+          echo "API Response: $RESPONSE"
           DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.downloadUrl')
           if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
-            echo "Failed to get download URL. Response: $RESPONSE"
+            echo "FlashDL failed. Response: $RESPONSE"
             exit 1
           fi
           echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
@@ -44,11 +44,11 @@ jobs:
         run: |
           EXT="${{ inputs.format == 'video' && 'mp4' || 'mp3' }}"
           curl -L -o "${{ env.TITLE }}.$EXT" "${{ env.DOWNLOAD_URL }}"
-          echo "FILE_NAME=${{ env.TITLE }}.$EXT" >> $GITHUB_ENV
+          echo "FILE=${{ env.TITLE }}.$EXT" >> $GITHUB_ENV
 
-      - name: Upload as artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: youtube-download
-          path: ${{ env.FILE_NAME }}
+          path: ${{ env.FILE }}
           retention-days: 90
