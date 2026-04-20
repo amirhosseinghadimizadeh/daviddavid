@@ -1,0 +1,89 @@
+name: YouTube Downloader (Piped API)
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'YouTube URL'
+        required: true
+        type: string
+      format:
+        description: 'video or audio'
+        required: true
+        default: 'video'
+        type: choice
+        options:
+          - video
+          - audio
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Extract video ID
+        id: extract
+        run: |
+          URL="${{ inputs.video_url }}"
+          # Extract video ID from any YouTube URL
+          VID=$(echo "$URL" | grep -oP '(?<=v=)[^&]+|(?<=youtu.be/)[^?]+')
+          echo "VIDEO_ID=$VID" >> $GITHUB_ENV
+          echo "Video ID: $VID"
+
+      - name: Get streaming URLs from Piped API
+        id: fetch
+        run: |
+          VID="${{ env.VIDEO_ID }}"
+          # Use a public Piped instance (kavin.rocks is reliable)
+          API_URL="https://pipedapi.kavin.rocks/streams/$VID"
+          echo "Fetching $API_URL"
+          RESPONSE=$(curl -s --max-time 30 "$API_URL")
+          
+          # Check if response is valid JSON
+          if ! echo "$RESPONSE" | jq empty 2>/dev/null; then
+            echo "ERROR: Invalid JSON response from Piped API"
+            exit 1
+          fi
+          
+          # Get video title
+          TITLE=$(echo "$RESPONSE" | jq -r '.title' | sed 's/[^a-zA-Z0-9]/_/g')
+          echo "TITLE=$TITLE" >> $GITHUB_ENV
+          
+          if [ "${{ inputs.format }}" = "video" ]; then
+            # Get the best video stream (with audio, progressive)
+            # videoStreams contains progressive mp4 files
+            DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.videoStreams | sort_by(.qualityLabel) | reverse | .[0].url')
+            if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+              # Fallback: use highest quality from videoStreams
+              DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.videoStreams[-1].url')
+            fi
+            EXT="mp4"
+          else
+            # Audio only – best audio stream
+            DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.audioStreams | sort_by(.bitrate) | reverse | .[0].url')
+            EXT="m4a"
+          fi
+          
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            echo "ERROR: Could not extract download URL"
+            echo "Response snippet: $(echo "$RESPONSE" | jq '.videoStreams[0]')"
+            exit 1
+          fi
+          
+          echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
+          echo "Found download URL"
+
+      - name: Download file with curl
+        run: |
+          FILENAME="${{ env.TITLE }}.${{ env.EXT }}"
+          curl -L -o "$FILENAME" "${{ env.DOWNLOAD_URL }}"
+          echo "FILE_NAME=$FILENAME" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-download
+          path: ${{ env.FILE_NAME }}
+          retention-days: 90
