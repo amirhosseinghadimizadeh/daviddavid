@@ -24,26 +24,19 @@ jobs:
         run: |
           cat > take-screenshot.mjs << 'EOF'
           import puppeteer from 'puppeteer';
-          import { existsSync, mkdirSync } from 'fs';
-
           const url = process.argv[2];
           if (!url) {
             console.error('No URL provided');
             process.exit(1);
           }
-
-          console.log(`Launching browser...`);
-          const browser = await puppeteer.launch({ headless: true });
+          const browser = await puppeteer.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+          });
           const page = await browser.newPage();
-          
-          console.log(`Navigating to ${url}...`);
           await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-          
-          console.log(`Taking full-page screenshot...`);
           await page.screenshot({ path: 'screenshot.png', fullPage: true });
-          
           await browser.close();
-          console.log('Done. Screenshot saved as screenshot.png');
           EOF
 
       - name: Run screenshot
