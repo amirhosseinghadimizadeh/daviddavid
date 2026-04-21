@@ -1,4 +1,4 @@
-name: SkyBlock Full Report (UUID/Username)
+name: SkyBlock Full Report with Tabs
 
 on:
   workflow_dispatch:
@@ -49,7 +49,7 @@ jobs:
             -H "API-Key: $HYPIXEL_API_KEY" \
             "https://api.hypixel.net/v2/player?key=$HYPIXEL_API_KEY&uuid=$UUID"
 
-      - name: Generate HTML Report
+      - name: Generate HTML Report with Tabs
         run: |
           python3 << 'PYTHON_SCRIPT'
           import json
@@ -103,12 +103,13 @@ jobs:
               members = selected_profile.get('members', {})
               member_data = members.get(uuid, {})
 
-          # ---------- Safe number formatter ----------
+          # ---------- Safe number formatting ----------
           def fmt(val):
               if isinstance(val, dict):
-                  # try to extract 'current' or first numeric value
                   if 'current' in val:
                       val = val['current']
+                  elif 'value' in val:
+                      val = val['value']
                   else:
                       for v in val.values():
                           if isinstance(v, (int, float)):
@@ -135,16 +136,17 @@ jobs:
               'SKILL_HUNTING': 'Hunting',
               'SKILL_SOCIAL': 'Social'
           }
-          skill_levels = []
+          skill_list = []
           for sk, name in skill_map.items():
               xp = skills.get(sk, 0)
-              level = 0
-              if xp > 0:
-                  if name in ['Combat', 'Enchanting', 'Mining']:
-                      level = min(60, int((xp / 14e6) * 60)) if xp < 14e6 else 60
-                  else:
-                      level = min(50, int((xp / 12e6) * 50)) if xp < 12e6 else 50
-              skill_levels.append((name, xp, level))
+              if xp == 0:
+                  continue
+              # approximate level
+              if name in ['Combat', 'Enchanting', 'Mining']:
+                  level = min(60, int((xp / 14e6) * 60)) if xp < 14e6 else 60
+              else:
+                  level = min(50, int((xp / 12e6) * 50)) if xp < 12e6 else 50
+              skill_list.append((name, xp, level))
 
           # ---------- Slayer ----------
           slayer = member_data.get('slayer', {}).get('slayer_bosses', {})
@@ -158,21 +160,18 @@ jobs:
                   len(data.get('claimed_levels', {}))
               ))
 
-          # ---------- Currencies (fix essence) ----------
+          # ---------- Currencies ----------
           coin_purse = member_data.get('currencies', {}).get('coin_purse', 0)
           bank_balance = member_data.get('banking', {}).get('balance', 0)
           motes = member_data.get('currencies', {}).get('motes_purse', 0)
           soulflow = member_data.get('item_data', {}).get('soulflow', 0)
           essence = member_data.get('currencies', {}).get('essence', {})
-
-          def get_essence(ess, typ):
-              val = ess.get(typ, 0)
-              if isinstance(val, dict):
-                  return val.get('current', 0)
-              return val
-
-          diamond_essence = get_essence(essence, 'DIAMOND')
-          gold_essence = get_essence(essence, 'GOLD')
+          diamond_essence = essence.get('DIAMOND', 0)
+          gold_essence = essence.get('GOLD', 0)
+          if isinstance(diamond_essence, dict):
+              diamond_essence = diamond_essence.get('current', 0)
+          if isinstance(gold_essence, dict):
+              gold_essence = gold_essence.get('current', 0)
 
           # ---------- Pets ----------
           pets = member_data.get('pets_data', {}).get('pets', [])
@@ -183,22 +182,21 @@ jobs:
           top_collections = sorted(collections.items(), key=lambda x: x[1], reverse=True)[:10]
 
           # ---------- Inventory (base64) ----------
-          def get_bag_data(path):
-              parts = path.split('.')
+          def get_bag_data(*keys):
               data = member_data
-              for p in parts:
-                  data = data.get(p, {})
+              for k in keys:
+                  data = data.get(k, {})
               return data.get('data', '')
 
           inv_contents = get_bag_data('inv_contents')
           ender_chest = get_bag_data('ender_chest_contents')
           armor = get_bag_data('inv_armor')
-          talisman_bag = get_bag_data('bag_contents.talisman_bag')
-          quiver = get_bag_data('bag_contents.quiver')
+          talisman_bag = get_bag_data('bag_contents', 'talisman_bag')
+          quiver = get_bag_data('bag_contents', 'quiver')
           wardrobe = get_bag_data('wardrobe_contents')
-          sacks = get_bag_data('bag_contents.sacks_bag')
-          potion_bag = get_bag_data('bag_contents.potion_bag')
-          fishing_bag = get_bag_data('bag_contents.fishing_bag')
+          sacks = get_bag_data('bag_contents', 'sacks_bag')
+          potion_bag = get_bag_data('bag_contents', 'potion_bag')
+          fishing_bag = get_bag_data('bag_contents', 'fishing_bag')
           personal_vault = get_bag_data('personal_vault_contents')
 
           # ---------- Rift ----------
@@ -227,7 +225,7 @@ jobs:
           # ---------- SkyBlock Level ----------
           sb_level = member_data.get('leveling', {}).get('experience', 0)
 
-          # ---------- Build HTML ----------
+          # ---------- Build HTML with Tabs ----------
           html_lines = []
           html_lines.append(f'''<!DOCTYPE html>
           <html lang="en">
@@ -265,11 +263,45 @@ jobs:
                       color: transparent;
                   }}
                   .sub {{ color: #9ca3af; margin-top: 0.3rem; }}
+                  .tabs {{
+                      display: flex;
+                      flex-wrap: wrap;
+                      background: #0f172a;
+                      border-bottom: 1px solid #1e2a44;
+                      padding: 0.5rem 1.5rem 0 1.5rem;
+                      gap: 0.25rem;
+                  }}
+                  .tab-btn {{
+                      background: transparent;
+                      border: none;
+                      color: #9ca3af;
+                      font-weight: 600;
+                      font-size: 0.9rem;
+                      padding: 0.7rem 1.2rem;
+                      cursor: pointer;
+                      border-radius: 2rem 2rem 0 0;
+                      transition: 0.2s;
+                  }}
+                  .tab-btn:hover {{ color: #facc15; background: #1e2a44; }}
+                  .tab-btn.active {{
+                      background: #1e2a44;
+                      color: #facc15;
+                      box-shadow: 0 -2px 0 #facc15 inset;
+                  }}
+                  .tab-content {{
+                      display: none;
+                      padding: 2rem 1.8rem;
+                      animation: fade 0.2s ease;
+                  }}
+                  .tab-content.active {{ display: block; }}
+                  @keyframes fade {{
+                      from {{ opacity: 0; transform: translateY(6px); }}
+                      to {{ opacity: 1; transform: translateY(0); }}
+                  }}
                   .stat-grid {{
                       display: grid;
                       grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
                       gap: 1.2rem;
-                      padding: 1.5rem;
                   }}
                   .card {{
                       background: #111827cc;
@@ -324,97 +356,115 @@ jobs:
                   <h1>⛏️ SkyBlock Report · {displayname}</h1>
                   <div class="sub">UUID: {uuid} | Rank: {rank} | First login: {first_login_str} | Last login: {last_login_str}</div>
               </header>
-              <div class="stat-grid">''')
+              <div class="tabs">
+                  <button class="tab-btn active" data-tab="general">📊 General</button>
+                  <button class="tab-btn" data-tab="skills">⚔️ Skills</button>
+                  <button class="tab-btn" data-tab="slayer">🧪 Slayer</button>
+                  <button class="tab-btn" data-tab="dungeons">🏰 Dungeons</button>
+                  <button class="tab-btn" data-tab="rift">🌀 Rift</button>
+                  <button class="tab-btn" data-tab="pets">🐾 Pets</button>
+                  <button class="tab-btn" data-tab="collections">📦 Collections</button>
+                  <button class="tab-btn" data-tab="accessories">🔮 Accessories</button>
+                  <button class="tab-btn" data-tab="inventory">🎒 Inventory</button>
+              </div>
 
-          # General
-          html_lines.append(f'''
+              <!-- General Tab -->
+              <div id="general" class="tab-content active">
+                  <div class="stat-grid">
+                      <div class="card">
+                          <h3>📊 General</h3>
+                          <div class="stat-row"><span>Network Level</span><span>{int(network_exp/100000) if network_exp else 0}</span></div>
+                          <div class="stat-row"><span>Achievement Points</span><span>{achievement_points}</span></div>
+                          <div class="stat-row"><span>Karma</span><span>{fmt(karma)}</span></div>
+                          <div class="stat-row"><span>SkyBlock Level</span><span>{sb_level}</span></div>
+                          <div class="stat-row"><span>Magical Power</span><span>{mp}</span></div>
+                          <div class="stat-row"><span>Selected Power</span><span>{selected_power}</span></div>
+                      </div>
+                      <div class="card">
+                          <h3>💰 Currencies</h3>
+                          <div class="stat-row"><span>Coin Purse</span><span>{fmt(coin_purse)}</span></div>
+                          <div class="stat-row"><span>Bank</span><span>{fmt(bank_balance)}</span></div>
+                          <div class="stat-row"><span>Motes</span><span>{fmt(motes)}</span></div>
+                          <div class="stat-row"><span>Soulflow</span><span>{fmt(soulflow)}</span></div>
+                          <div class="stat-row"><span>Essence (Diamond/Gold)</span><span>{fmt(diamond_essence)} / {fmt(gold_essence)}</span></div>
+                      </div>
+                  </div>
+              </div>
+
+              <!-- Skills Tab -->
+              <div id="skills" class="tab-content">
                   <div class="card">
-                      <h3>📊 General</h3>
-                      <div class="stat-row"><span>Network Level</span><span>{int(network_exp/100000) if network_exp else 0}</span></div>
-                      <div class="stat-row"><span>Achievement Points</span><span>{achievement_points}</span></div>
-                      <div class="stat-row"><span>Karma</span><span>{fmt(karma)}</span></div>
-                      <div class="stat-row"><span>SkyBlock Level</span><span>{sb_level}</span></div>
-                      <div class="stat-row"><span>Magical Power</span><span>{mp}</span></div>
-                      <div class="stat-row"><span>Selected Power</span><span>{selected_power}</span></div>
-                  </div>''')
+                      <h3>⚔️ Skills</h3>''')
+          for name, xp, lvl in skill_list:
+              html_lines.append(f'<div class="stat-row"><span>{name}</span><span>Lvl {lvl} ({xp/1e6:.1f}M XP)</span></div>')
+          html_lines.append('</div></div>')
 
-          # Currencies
-          html_lines.append(f'''
-                  <div class="card">
-                      <h3>💰 Currencies</h3>
-                      <div class="stat-row"><span>Coin Purse</span><span>{fmt(coin_purse)}</span></div>
-                      <div class="stat-row"><span>Bank</span><span>{fmt(bank_balance)}</span></div>
-                      <div class="stat-row"><span>Motes</span><span>{fmt(motes)}</span></div>
-                      <div class="stat-row"><span>Soulflow</span><span>{fmt(soulflow)}</span></div>
-                      <div class="stat-row"><span>Essence (Diamond/Gold)</span><span>{fmt(diamond_essence)} / {fmt(gold_essence)}</span></div>
-                  </div>''')
-
-          # Skills
-          html_lines.append('<div class="card"><h3>⚔️ Skills</h3>')
-          for name, xp, lvl in skill_levels:
-              if xp > 0:
-                  html_lines.append(f'<div class="stat-row"><span>{name}</span><span>Lvl {lvl} ({xp/1e6:.1f}M XP)</span></div>')
-          html_lines.append('</div>')
-
-          # Slayer
-          html_lines.append('<div class="card"><h3>🧪 Slayer</h3>')
+          # Slayer Tab
+          html_lines.append('<div id="slayer" class="tab-content"><div class="card"><h3>🧪 Slayer</h3>')
           for boss, xp, t4, t5, lvl in slayer_list:
               html_lines.append(f'<div class="stat-row"><span>{boss}</span><span>XP {xp/1000:.1f}k | Lvl {lvl} | T4/T5 kills {t4}/{t5}</span></div>')
-          html_lines.append('</div>')
+          html_lines.append('</div></div>')
 
-          # Dungeons
+          # Dungeons Tab
           html_lines.append(f'''
+              <div id="dungeons" class="tab-content">
                   <div class="card">
                       <h3>🏰 Dungeons</h3>
                       <div class="stat-row"><span>Catacombs Level</span><span>{cata_level}</span></div>
                       <div class="stat-row"><span>Master Catacombs</span><span>{master_level}</span></div>
                       <div class="stat-row"><span>Secrets Found</span><span>{fmt(secrets)}</span></div>
                       <div class="stat-row"><span>F7 Completions</span><span>{fmt(f7_completions)}</span></div>
-                  </div>''')
+                  </div>
+              </div>''')
 
-          # Rift
+          # Rift Tab
           html_lines.append(f'''
+              <div id="rift" class="tab-content">
                   <div class="card">
                       <h3>🌀 Rift</h3>
                       <div class="stat-row"><span>Motes</span><span>{fmt(rift_motes)}</span></div>
                       <div class="stat-row"><span>Enigma Souls</span><span>{enigma_souls}</span></div>
                       <div class="stat-row"><span>Gallery Trophies</span><span>{gallery_trophies}</span></div>
                       <div class="stat-row"><span>Rift Visits</span><span>{rift_visits}</span></div>
-                  </div>''')
+                  </div>
+              </div>''')
 
-          # Top Pets
-          html_lines.append('<div class="card"><h3>🐾 Top Pets</h3>')
-          for p in top_pets[:5]:
+          # Pets Tab
+          html_lines.append('<div id="pets" class="tab-content"><div class="card"><h3>🐾 Top Pets</h3>')
+          for p in top_pets[:10]:
               pet_type = p.get('type', 'Unknown').replace('_', ' ').title()
               pet_exp = p.get('exp', 0)
               pet_level = int(pet_exp / 1e6) if pet_exp > 0 else 0
               pet_tier = p.get('tier', 'Common')
               html_lines.append(f'<div class="stat-row"><span>{pet_type}</span><span>Lvl {pet_level}M | {pet_tier}</span></div>')
-          html_lines.append('</div>')
+          html_lines.append('</div></div>')
 
-          # Top Collections
-          html_lines.append('<div class="card"><h3>📦 Top Collections</h3>')
-          for item, amount in top_collections[:5]:
+          # Collections Tab
+          html_lines.append('<div id="collections" class="tab-content"><div class="card"><h3>📦 Top Collections</h3>')
+          for item, amount in top_collections[:10]:
               item_name = item.replace('_', ' ').title()
               html_lines.append(f'<div class="stat-row"><span>{item_name}</span><span>{fmt(amount)}</span></div>')
-          html_lines.append('</div>')
+          html_lines.append('</div></div>')
 
-          # Accessories
+          # Accessories Tab
           html_lines.append(f'''
+              <div id="accessories" class="tab-content">
                   <div class="card">
                       <h3>🔮 Accessories</h3>
                       <div class="stat-row"><span>Magical Power</span><span>{mp}</span></div>
                       <div class="stat-row"><span>Selected Power</span><span>{selected_power}</span></div>
                       <div class="stat-row"><span>Unlocked Powers</span><span>{', '.join(unlocked_powers[:5])}{'...' if len(unlocked_powers) > 5 else ''}</span></div>
-                  </div>''')
+                  </div>
+              </div>''')
 
-          # Inventory (Base64)
-          def trunc(s, max_len=100):
+          # Inventory Tab (Base64)
+          def trunc(s, max_len=200):
               if not s:
                   return '(empty)'
               return s[:max_len] + ('...' if len(s) > max_len else '')
 
           html_lines.append(f'''
+              <div id="inventory" class="tab-content">
                   <div class="card">
                       <h3>🎒 Inventory Data (Base64)</h3>
                       <div class="inventory-data"><strong>inv_contents:</strong> {trunc(inv_contents)}</div>
@@ -427,11 +477,22 @@ jobs:
                       <div class="inventory-data"><strong>potion_bag:</strong> {trunc(potion_bag)}</div>
                       <div class="inventory-data"><strong>fishing_bag:</strong> {trunc(fishing_bag)}</div>
                       <div class="inventory-data"><strong>personal_vault:</strong> {trunc(personal_vault)}</div>
-                      <div class="badge" style="margin-top:0.5rem;">🔐 Data is Base64‑encoded NBT. Use external tools to decode.</div>
+                      <div class="badge" style="margin-top:0.5rem;">🔐 Data is Base64‑encoded NBT. Use <a href="https://irath96.github.io/webNBT/" target="_blank">webNBT</a> to decode items.</div>
                   </div>
               </div>
               <footer>Generated from Hypixel API (v2) · Data as of {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</footer>
           </div>
+          <script>
+              document.querySelectorAll('.tab-btn').forEach(btn => {{
+                  btn.addEventListener('click', () => {{
+                      const tabId = btn.getAttribute('data-tab');
+                      document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+                      document.getElementById(tabId).classList.add('active');
+                      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                      btn.classList.add('active');
+                  }});
+              }});
+          </script>
           </body>
           </html>''')
 
