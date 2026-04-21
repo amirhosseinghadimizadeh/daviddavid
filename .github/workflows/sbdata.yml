@@ -1,0 +1,393 @@
+name: SkyBlock Full Report (HTML)
+
+on:
+  workflow_dispatch:
+    inputs:
+      player_name:
+        description: 'Minecraft username'
+        required: true
+        type: string
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get UUID from Mojang
+        id: uuid
+        run: |
+          USERNAME="${{ github.event.inputs.player_name }}"
+          RESPONSE=$(curl --max-time 10 -s "https://api.mojang.com/users/profiles/minecraft/$USERNAME")
+          UUID=$(echo "$RESPONSE" | jq -r '.id')
+          if [ "$UUID" = "null" ] || [ -z "$UUID" ]; then
+            echo "❌ Invalid username"
+            exit 1
+          fi
+          echo "uuid=$UUID" >> $GITHUB_OUTPUT
+          echo "✅ UUID: $UUID"
+
+      - name: Fetch SkyBlock Profiles (v2)
+        env:
+          HYPIXEL_API_KEY: ${{ secrets.HYPIXEL_API_KEY }}
+        run: |
+          UUID="${{ steps.uuid.outputs.uuid }}"
+          curl -s -H "API-Key: $HYPIXEL_API_KEY" \
+            "https://api.hypixel.net/v2/skyblock/profiles?key=$HYPIXEL_API_KEY&uuid=$UUID" \
+            > skyblock_profiles.json
+          echo "✅ Saved skyblock_profiles.json"
+
+      - name: Fetch Player Data (v2)
+        env:
+          HYPIXEL_API_KEY: ${{ secrets.HYPIXEL_API_KEY }}
+        run: |
+          UUID="${{ steps.uuid.outputs.uuid }}"
+          curl -s -H "API-Key: $HYPIXEL_API_KEY" \
+            "https://api.hypixel.net/v2/player?key=$HYPIXEL_API_KEY&uuid=$UUID" \
+            > player_data.json
+          echo "✅ Saved player_data.json"
+
+      - name: Generate HTML report
+        run: |
+          python3 << 'EOF'
+          import json
+          import os
+          from datetime import datetime
+
+          # Load data
+          with open('skyblock_profiles.json') as f:
+              profiles_data = json.load(f)
+          with open('player_data.json') as f:
+              player_data = json.load(f)
+
+          # Extract player info
+          player = player_data.get('player', {})
+          displayname = player.get('displayname', 'Unknown')
+          uuid = player.get('uuid', '')
+          first_login = player.get('firstLogin', 0)
+          last_login = player.get('lastLogin', 0)
+          network_exp = player.get('networkExp', 0)
+          karma = player.get('karma', 0)
+          achievement_points = player.get('achievementPoints', 0)
+          rank = player.get('newPackageRank', 'NONE')
+          if rank == 'MVP_PLUS':
+              rank = 'MVP+' + (f" {player.get('rankPlusColor', '')}" if player.get('rankPlusColor') else '')
+          elif rank == 'MVP':
+              rank = 'MVP'
+          elif rank == 'VIP_PLUS':
+              rank = 'VIP+'
+          elif rank == 'VIP':
+              rank = 'VIP'
+
+          # Format timestamps
+          def format_time(ts):
+              if ts and ts > 0:
+                  return datetime.utcfromtimestamp(ts/1000).strftime('%Y-%m-%d %H:%M:%S UTC')
+              return 'Never'
+
+          first_login_str = format_time(first_login)
+          last_login_str = format_time(last_login)
+
+          # Find selected profile
+          profiles = profiles_data.get('profiles', [])
+          selected_profile = None
+          for p in profiles:
+              if p.get('selected'):
+                  selected_profile = p
+                  break
+          if not selected_profile and profiles:
+              selected_profile = profiles[0]
+
+          member_data = {}
+          if selected_profile:
+              members = selected_profile.get('members', {})
+              member_data = members.get(uuid, {})
+
+          # Helper to get nested dict values safely
+          def get_nested(data, path, default=0):
+              keys = path.split('.')
+              for k in keys:
+                  if isinstance(data, dict):
+                      data = data.get(k, default)
+                  else:
+                      return default
+              return data
+
+          # Skills
+          skills = member_data.get('experience', {})
+          skill_map = {
+              'SKILL_COMBAT': 'Combat',
+              'SKILL_TAMING': 'Taming',
+              'SKILL_ENCHANTING': 'Enchanting',
+              'SKILL_MINING': 'Mining',
+              'SKILL_FARMING': 'Farming',
+              'SKILL_ALCHEMY': 'Alchemy',
+              'SKILL_FORAGING': 'Foraging',
+              'SKILL_CARPENTRY': 'Carpentry',
+              'SKILL_FISHING': 'Fishing',
+              'SKILL_RUNECRAFTING': 'Runecrafting',
+              'SKILL_HUNTING': 'Hunting',
+              'SKILL_SOCIAL': 'Social'
+          }
+          skill_levels = {}
+          for sk, name in skill_map.items():
+              xp = skills.get(sk, 0)
+              # approximate level (very rough, just for display)
+              level = 0
+              if xp > 0:
+                  if name in ['Combat', 'Enchanting', 'Mining']:
+                      level = min(60, int((xp / 14e6) * 60)) if xp < 14e6 else 60
+                  else:
+                      level = min(50, int((xp / 12e6) * 50)) if xp < 12e6 else 50
+              skill_levels[name] = {'xp': xp, 'level': level}
+
+          # Slayer
+          slayer = member_data.get('slayer', {}).get('slayer_bosses', {})
+          slayer_data = {}
+          for boss, data in slayer.items():
+              slayer_data[boss.capitalize()] = {
+                  'xp': data.get('xp', 0),
+                  'kills_t4': data.get('boss_kills_tier_4', 0),
+                  'kills_t5': data.get('boss_kills_tier_5', 0),
+                  'level': len(data.get('claimed_levels', {}))
+              }
+
+          # Currencies
+          coin_purse = member_data.get('currencies', {}).get('coin_purse', 0)
+          bank_balance = member_data.get('banking', {}).get('balance', 0)
+          motes = member_data.get('currencies', {}).get('motes_purse', 0)
+          soulflow = member_data.get('item_data', {}).get('soulflow', 0)
+          essence = member_data.get('currencies', {}).get('essence', {})
+
+          # Pets
+          pets = member_data.get('pets_data', {}).get('pets', [])
+          top_pets = sorted(pets, key=lambda x: x.get('exp', 0), reverse=True)[:10]
+
+          # Collections (first 10)
+          collections = member_data.get('collection', {})
+          top_collections = sorted(collections.items(), key=lambda x: x[1], reverse=True)[:10]
+
+          # Inventory (base64 placeholders)
+          inv_contents = member_data.get('inv_contents', {}).get('data', '')
+          ender_chest = member_data.get('ender_chest_contents', {}).get('data', '')
+          armor = member_data.get('inv_armor', {}).get('data', '')
+          talisman_bag = member_data.get('bag_contents', {}).get('talisman_bag', {}).get('data', '')
+          quiver = member_data.get('bag_contents', {}).get('quiver', {}).get('data', '')
+          wardrobe = member_data.get('wardrobe_contents', {}).get('data', '')
+
+          # Rift progress
+          rift = member_data.get('rift', {})
+          rift_motes = member_data.get('currencies', {}).get('motes_purse', 0)
+          enigma_souls = len(rift.get('enigma', {}).get('found_souls', []))
+          gallery_trophies = len(rift.get('gallery', {}).get('secured_trophies', []))
+
+          # Dungeons
+          dungeons = member_data.get('dungeons', {})
+          catacombs = dungeons.get('dungeon_types', {}).get('catacombs', {})
+          master_catacombs = dungeons.get('dungeon_types', {}).get('master_catacombs', {})
+          cata_level = catacombs.get('experience', 0)
+          # rough level (0-50)
+          cata_level_num = min(50, int(cata_level / 15e6 * 50)) if cata_level < 15e6 else 50
+          secrets = dungeons.get('secrets', 0)
+
+          # Build HTML
+          html = f'''<!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>SkyBlock Report · {displayname}</title>
+              <style>
+                  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+                  body {{
+                      background: #0b1120;
+                      font-family: 'Segoe UI', system-ui, sans-serif;
+                      padding: 2rem;
+                      color: #e2e8f0;
+                  }}
+                  .container {{
+                      max-width: 1400px;
+                      margin: 0 auto;
+                      background: #0f172ad9;
+                      border-radius: 2rem;
+                      backdrop-filter: blur(2px);
+                      border: 1px solid #2d3a5e;
+                      overflow: hidden;
+                  }}
+                  header {{
+                      background: linear-gradient(135deg, #0f172a, #111827);
+                      padding: 1.5rem 2rem;
+                      border-bottom: 1px solid #facc1522;
+                  }}
+                  h1 {{
+                      font-size: 2rem;
+                      background: linear-gradient(120deg, #facc15, #eab308);
+                      background-clip: text;
+                      -webkit-background-clip: text;
+                      color: transparent;
+                  }}
+                  .sub { color: #9ca3af; margin-top: 0.3rem; }
+                  .stat-grid {{
+                      display: grid;
+                      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+                      gap: 1.2rem;
+                      padding: 1.5rem;
+                  }}
+                  .card {{
+                      background: #111827cc;
+                      border-radius: 1.2rem;
+                      padding: 1.2rem;
+                      border: 1px solid #2d3a5e;
+                  }}
+                  .card h3 {{
+                      color: #facc15;
+                      font-size: 1.2rem;
+                      margin-bottom: 1rem;
+                      border-left: 3px solid #facc15;
+                      padding-left: 0.7rem;
+                  }}
+                  .stat-row {{
+                      display: flex;
+                      justify-content: space-between;
+                      padding: 0.4rem 0;
+                      border-bottom: 1px dashed #1e2a44;
+                      font-size: 0.85rem;
+                  }}
+                  .badge {{
+                      background: #facc1522;
+                      color: #facc15;
+                      padding: 0.2rem 0.6rem;
+                      border-radius: 20px;
+                      font-size: 0.7rem;
+                  }}
+                  .inventory-data {{
+                      background: #0f172a;
+                      padding: 0.8rem;
+                      border-radius: 1rem;
+                      font-family: monospace;
+                      font-size: 0.65rem;
+                      overflow-x: auto;
+                      white-space: pre-wrap;
+                      word-break: break-all;
+                  }}
+                  footer {{
+                      text-align: center;
+                      padding: 1rem;
+                      font-size: 0.7rem;
+                      border-top: 1px solid #1e2a44;
+                      color: #5b6e8c;
+                  }}
+                  a {{ color: #facc15; }}
+              </style>
+          </head>
+          <body>
+          <div class="container">
+              <header>
+                  <h1>⛏️ SkyBlock Report · {displayname}</h1>
+                  <div class="sub">UUID: {uuid} | Rank: {rank} | First login: {first_login_str} | Last login: {last_login_str}</div>
+              </header>
+
+              <div class="stat-grid">
+                  <!-- General -->
+                  <div class="card">
+                      <h3>📊 General</h3>
+                      <div class="stat-row"><span>Network Level</span><span>{int(network_exp/100000) if network_exp else 0}</span></div>
+                      <div class="stat-row"><span>Achievement Points</span><span>{achievement_points}</span></div>
+                      <div class="stat-row"><span>Karma</span><span>{karma:,}</span></div>
+                      <div class="stat-row"><span>SkyBlock Level</span><span>{member_data.get('leveling', {}).get('experience', 0)}</span></div>
+                      <div class="stat-row"><span>Magical Power</span><span>{member_data.get('accessory_bag_storage', {}).get('highest_magical_power', 0)}</span></div>
+                  </div>
+
+                  <!-- Currencies -->
+                  <div class="card">
+                      <h3>💰 Currencies</h3>
+                      <div class="stat-row"><span>Coin Purse</span><span>{coin_purse:,.0f}</span></div>
+                      <div class="stat-row"><span>Bank</span><span>{bank_balance:,.0f}</span></div>
+                      <div class="stat-row"><span>Motes</span><span>{motes:,}</span></div>
+                      <div class="stat-row"><span>Soulflow</span><span>{soulflow:,}</span></div>
+                      <div class="stat-row"><span>Essence (Diamond/Gold)</span><span>{essence.get('DIAMOND', 0):,} / {essence.get('GOLD', 0):,}</span></div>
+                  </div>
+
+                  <!-- Skills -->
+                  <div class="card">
+                      <h3>⚔️ Skills</h3>
+                      {''.join([f'<div class="stat-row"><span>{name}</span><span>Lvl {info["level"]} ({info["xp"]/1e6:.1f}M XP)</span></div>' for name, info in skill_levels.items() if info['xp'] > 0])}
+                  </div>
+
+                  <!-- Slayer -->
+                  <div class="card">
+                      <h3>🧪 Slayer</h3>
+                      {''.join([f'<div class="stat-row"><span>{boss}</span><span>XP {info["xp"]/1000:.1f}k | Lvl {info["level"]} | T4/T5 kills {info["kills_t4"]}/{info["kills_t5"]}</span></div>' for boss, info in slayer_data.items()])}
+                  </div>
+
+                  <!-- Dungeons -->
+                  <div class="card">
+                      <h3>🏰 Dungeons</h3>
+                      <div class="stat-row"><span>Catacombs Level</span><span>{cata_level_num}</span></div>
+                      <div class="stat-row"><span>Master Catacombs</span><span>{min(50, int(master_cacombs.get('experience', 0)/20e6*50)) if master_cacombs.get('experience',0) else 0}</span></div>
+                      <div class="stat-row"><span>Secrets Found</span><span>{secrets:,}</span></div>
+                      <div class="stat-row"><span>F7 Completions</span><span>{catacombs.get('tier_completions', {}).get('7', 0)}</span></div>
+                  </div>
+
+                  <!-- Rift -->
+                  <div class="card">
+                      <h3>🌀 Rift</h3>
+                      <div class="stat-row"><span>Motes</span><span>{rift_motes:,}</span></div>
+                      <div class="stat-row"><span>Enigma Souls</span><span>{enigma_souls}</span></div>
+                      <div class="stat-row"><span>Gallery Trophies</span><span>{gallery_trophies}</span></div>
+                      <div class="stat-row"><span>Rift Visits</span><span>{rift.get('visits', 0)}</span></div>
+                  </div>
+
+                  <!-- Pets (Top 5) -->
+                  <div class="card">
+                      <h3>🐾 Top Pets</h3>
+                      {''.join([f'<div class="stat-row"><span>{p.get("type", "Unknown").replace("_", " ").title()}</span><span>Lvl {int(p.get("exp", 0)/1e6)}M | {p.get("tier", "Common")}</span></div>' for p in top_pets[:5]])}
+                  </div>
+
+                  <!-- Collections Top 5 -->
+                  <div class="card">
+                      <h3>📦 Top Collections</h3>
+                      {''.join([f'<div class="stat-row"><span>{item.replace("_", " ").title()}</span><span>{amount:,}</span></div>' for item, amount in top_collections[:5]])}
+                  </div>
+
+                  <!-- Inventory (Base64 placeholders) -->
+                  <div class="card">
+                      <h3>🎒 Inventory Data (Base64)</h3>
+                      <div class="inventory-data"><strong>inv_contents:</strong> {inv_contents[:100]}{'...' if len(inv_contents)>100 else ''}</div>
+                      <div class="inventory-data"><strong>ender_chest:</strong> {ender_chest[:100]}{'...' if len(ender_chest)>100 else ''}</div>
+                      <div class="inventory-data"><strong>armor:</strong> {armor[:100]}{'...' if len(armor)>100 else ''}</div>
+                      <div class="inventory-data"><strong>talisman_bag:</strong> {talisman_bag[:100]}{'...' if len(talisman_bag)>100 else ''}</div>
+                      <div class="inventory-data"><strong>quiver:</strong> {quiver[:100]}{'...' if len(quiver)>100 else ''}</div>
+                      <div class="inventory-data"><strong>wardrobe:</strong> {wardrobe[:100]}{'...' if len(wardrobe)>100 else ''}</div>
+                      <div class="badge" style="margin-top:0.5rem;">🔐 Data is Base64‑encoded NBT. Use external tools to decode.</div>
+                  </div>
+              </div>
+              <footer>Generated from Hypixel API (v2) · Data as of {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</footer>
+          </div>
+          </body>
+          </html>
+          '''
+
+          with open('skyblock_report.html', 'w') as f:
+              f.write(html)
+          print("✅ HTML report generated: skyblock_report.html")
+          EOF
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: skyblock-report-${{ github.event.inputs.player_name }}
+          path: skyblock_report.html
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload raw JSON (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-json-files
+          path: |
+            skyblock_profiles.json
+            player_data.json
+          retention-days: 3
+          if-no-files-found: ignore
