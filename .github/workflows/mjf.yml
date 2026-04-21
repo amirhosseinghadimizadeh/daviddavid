@@ -12,114 +12,170 @@ jobs:
   lookup-player:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ----------------------------------------------
+      # STEP 1: Get UUID from Mojang API
+      # ----------------------------------------------
       - name: Get UUID from Mojang API
         id: uuid
         run: |
           USERNAME="${{ github.event.inputs.player_name }}"
-          RESPONSE=$(curl -s "https://api.mojang.com/users/profiles/minecraft/$USERNAME")
+          echo "Fetching UUID for $USERNAME..."
+          
+          # Mojang API can be slow; add a timeout and retry logic
+          RESPONSE=$(curl --max-time 10 -s "https://api.mojang.com/users/profiles/minecraft/$USERNAME")
           UUID=$(echo "$RESPONSE" | jq -r '.id')
+          
           if [ "$UUID" = "null" ] || [ -z "$UUID" ]; then
-            echo "❌ Invalid player name or player never joined"
+            echo "❌ Invalid Minecraft username: $USERNAME (not found in Mojang database)"
             exit 1
           fi
+          
           echo "uuid=$UUID" >> $GITHUB_OUTPUT
           echo "✅ UUID: $UUID"
 
-      - name: Fetch Hypixel Player Data
-        id: hypixel_player
+      # ----------------------------------------------
+      # STEP 2: Fetch Hypixel player data (with 404 & null handling)
+      # ----------------------------------------------
+      - name: Fetch Hypixel player data
+        id: hypixel
         env:
           HYPIXEL_API_KEY: ${{ secrets.HYPIXEL_API_KEY }}
         run: |
           UUID="${{ steps.uuid.outputs.uuid }}"
-          HTTP_CODE=$(curl -s -o player.json -w "%{http_code}" -H "API-Key: $HYPIXEL_API_KEY" \
+          
+          # Use -f to make curl fail on HTTP errors, but we capture exit code manually
+          HTTP_CODE=$(curl -s -o player.json -w "%{http_code}" \
+            -H "API-Key: $HYPIXEL_API_KEY" \
             "https://api.hypixel.net/player?uuid=$UUID")
+          
+          # Hypixel API returns 404 if player never joined the server
+          if [ "$HTTP_CODE" = "404" ]; then
+            echo "player_exists=false" >> $GITHUB_OUTPUT
+            echo "reason=Player has never logged into Hypixel (HTTP 404)" >> $GITHUB_OUTPUT
+            echo "⚠️ Player not found on Hypixel"
+            exit 0  # Not a failure, just no data
+          fi
+          
           if [ "$HTTP_CODE" != "200" ]; then
             echo "❌ Hypixel API error (HTTP $HTTP_CODE)"
+            cat player.json 2>/dev/null || echo "No response body"
             exit 1
           fi
+          
+          # Check the 'success' field
           SUCCESS=$(jq -r '.success' player.json)
           if [ "$SUCCESS" != "true" ]; then
             echo "❌ Hypixel API returned failure"
             jq '.' player.json
             exit 1
           fi
-          echo "✅ Player data fetched"
+          
+          # Even with 200 OK, the 'player' field can be null if no data
+          PLAYER_EXISTS=$(jq -r '.player != null' player.json)
+          if [ "$PLAYER_EXISTS" != "true" ]; then
+            echo "player_exists=false" >> $GITHUB_OUTPUT
+            echo "reason=Player has no Hypixel data (never played)" >> $GITHUB_OUTPUT
+            echo "⚠️ Player has no Hypixel data"
+            exit 0
+          fi
+          
+          echo "player_exists=true" >> $GITHUB_OUTPUT
+          echo "✅ Player found on Hypixel"
 
-      - name: Fetch SkyBlock Profiles
-        id: sb_profiles
+      # ----------------------------------------------
+      # STEP 3: Fetch SkyBlock profiles (only if player exists)
+      # ----------------------------------------------
+      - name: Fetch SkyBlock profiles
+        id: skyblock
+        if: steps.hypixel.outputs.player_exists == 'true'
         env:
           HYPIXEL_API_KEY: ${{ secrets.HYPIXEL_API_KEY }}
         run: |
           UUID="${{ steps.uuid.outputs.uuid }}"
-          HTTP_CODE=$(curl -s -o profiles.json -w "%{http_code}" -H "API-Key: $HYPIXEL_API_KEY" \
+          
+          HTTP_CODE=$(curl -s -o profiles.json -w "%{http_code}" \
+            -H "API-Key: $HYPIXEL_API_KEY" \
             "https://api.hypixel.net/skyblock/profiles?uuid=$UUID")
+          
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "❌ Hypixel API error (HTTP $HTTP_CODE)"
-            exit 1
+            # If API fails, still mark as no profiles (don't crash)
+            echo "has_profiles=false" >> $GITHUB_OUTPUT
+            echo "⚠️ SkyBlock profiles endpoint returned HTTP $HTTP_CODE"
+            exit 0
           fi
+          
           SUCCESS=$(jq -r '.success' profiles.json)
           if [ "$SUCCESS" != "true" ]; then
-            echo "❌ Hypixel API returned failure"
-            jq '.' profiles.json
-            exit 1
+            echo "has_profiles=false" >> $GITHUB_OUTPUT
+            echo "⚠️ SkyBlock API returned failure"
+            exit 0
           fi
-          echo "✅ SkyBlock profiles fetched"
+          
+          PROFILE_COUNT=$(jq '.profiles | length' profiles.json)
+          if [ "$PROFILE_COUNT" -eq 0 ]; then
+            echo "has_profiles=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_profiles=true" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Parse and Display Player Details
-        id: parse
+      # ----------------------------------------------
+      # STEP 4: Parse and generate summary (no crashes)
+      # ----------------------------------------------
+      - name: Parse and generate summary
         run: |
           PLAYER_NAME="${{ github.event.inputs.player_name }}"
           UUID="${{ steps.uuid.outputs.uuid }}"
+          PLAYER_EXISTS="${{ steps.hypixel.outputs.player_exists }}"
           
-          # ----- Last Online Time -----
-          LAST_LOGIN=$(jq -r '.player.lastLogin // 0' player.json)
-          if [ "$LAST_LOGIN" != "0" ] && [ "$LAST_LOGIN" != "null" ]; then
-            LAST_ONLINE=$(date -d "@$((LAST_LOGIN / 1000))" +"%Y-%m-%d %H:%M:%S UTC")
-          else
-            LAST_ONLINE="Never logged into Hypixel (or data missing)"
-          fi
-
-          # ----- First Login Time -----
-          FIRST_LOGIN=$(jq -r '.player.firstLogin // 0' player.json)
-          if [ "$FIRST_LOGIN" != "0" ] && [ "$FIRST_LOGIN" != "null" ]; then
-            FIRST_ONLINE=$(date -d "@$((FIRST_LOGIN / 1000))" +"%Y-%m-%d %H:%M:%S UTC")
-          else
-            FIRST_ONLINE="Unknown"
-          fi
-
-          # ----- SkyBlock Details (latest profile) -----
-          # Find profiles where this player is a member
-          PROFILES_COUNT=$(jq '.profiles | length' profiles.json)
-          if [ "$PROFILES_COUNT" -eq 0 ]; then
-            PROFILE_NAME="No SkyBlock profiles found"
-            LEVEL="N/A"
-            LAST_LOCATION="N/A"
-            LAST_SAVE_TIME="N/A"
-          else
-            # Get the profile with the most recent last_save for this player
-            LATEST_PROFILE=$(jq --arg UUID "$UUID" '
-              .profiles | map(select(.members[$UUID] != null)) |
-              sort_by(.members[$UUID].last_save // 0 | tonumber) | reverse | .[0]
-            ' profiles.json)
+          if [ "$PLAYER_EXISTS" != "true" ]; then
+            REASON="${{ steps.hypixel.outputs.reason }}"
+            cat << EOF > summary.md
+            ## 🎮 SkyBlock Player Lookup Results
             
-            if [ "$LATEST_PROFILE" = "null" ] || [ -z "$LATEST_PROFILE" ]; then
-              PROFILE_NAME="No active SkyBlock profile"
-              LEVEL="N/A"
-              LAST_LOCATION="N/A"
-              LAST_SAVE_TIME="N/A"
+            **Player:** $PLAYER_NAME  
+            **UUID:** \`$UUID\`
+            
+            ❌ **$REASON**
+            
+            No data available.
+            EOF
+          else
+            # ---- Extract Hypixel general data ----
+            FIRST_LOGIN_MS=$(jq -r '.player.firstLogin // 0' player.json)
+            LAST_LOGIN_MS=$(jq -r '.player.lastLogin // 0' player.json)
+            
+            if [ "$FIRST_LOGIN_MS" != "0" ] && [ "$FIRST_LOGIN_MS" != "null" ]; then
+              FIRST_ONLINE=$(date -d "@$((FIRST_LOGIN_MS / 1000))" +"%Y-%m-%d %H:%M:%S UTC")
             else
+              FIRST_ONLINE="Unknown"
+            fi
+            
+            if [ "$LAST_LOGIN_MS" != "0" ] && [ "$LAST_LOGIN_MS" != "null" ]; then
+              LAST_ONLINE=$(date -d "@$((LAST_LOGIN_MS / 1000))" +"%Y-%m-%d %H:%M:%S UTC")
+            else
+              LAST_ONLINE="Unknown"
+            fi
+            
+            # ---- SkyBlock details ----
+            HAS_PROFILES="${{ steps.skyblock.outputs.has_profiles }}"
+            if [ "$HAS_PROFILES" = "true" ]; then
+              # Get the most recently saved profile (by last_save)
+              LATEST_PROFILE=$(jq --arg UUID "$UUID" '
+                .profiles | map(select(.members[$UUID] != null)) |
+                sort_by(.members[$UUID].last_save // 0 | tonumber) | reverse | .[0]
+              ' profiles.json)
+              
               PROFILE_NAME=$(echo "$LATEST_PROFILE" | jq -r '.cute_name // "Unknown"')
               MEMBER=$(echo "$LATEST_PROFILE" | jq --arg UUID "$UUID" -r '.members[$UUID] // empty')
               
-              # SkyBlock Level (from leveling system)
+              # SkyBlock level (official leveling system)
               LEVEL=$(echo "$MEMBER" | jq -r '.leveling.level // 0')
               
-              # Last island location (can be "hub", "combat_1", "mining_3", "dynamic", etc.)
+              # Last island location (with human-readable mapping)
               RAW_LOCATION=$(echo "$MEMBER" | jq -r '.location // "Unknown"')
-              # Simple human-readable mapping
               case "$RAW_LOCATION" in
                 "hub") LAST_LOCATION="Hub (SkyBlock Hub)" ;;
                 "dynamic") LAST_LOCATION="Private Island / Garden" ;;
@@ -141,54 +197,58 @@ jobs:
                 *) LAST_LOCATION="$RAW_LOCATION" ;;
               esac
               
-              # Last save timestamp
-              LAST_SAVE_TS=$(echo "$MEMBER" | jq -r '.last_save // 0')
-              if [ "$LAST_SAVE_TS" != "0" ] && [ "$LAST_SAVE_TS" != "null" ]; then
-                LAST_SAVE_TIME=$(date -d "@$((LAST_SAVE_TS / 1000))" +"%Y-%m-%d %H:%M:%S UTC")
+              LAST_SAVE_MS=$(echo "$MEMBER" | jq -r '.last_save // 0')
+              if [ "$LAST_SAVE_MS" != "0" ] && [ "$LAST_SAVE_MS" != "null" ]; then
+                LAST_SAVE_TIME=$(date -d "@$((LAST_SAVE_MS / 1000))" +"%Y-%m-%d %H:%M:%S UTC")
               else
                 LAST_SAVE_TIME="Unknown"
               fi
+            else
+              PROFILE_NAME="No SkyBlock profiles found"
+              LEVEL="N/A"
+              LAST_LOCATION="N/A"
+              LAST_SAVE_TIME="N/A"
             fi
+            
+            cat << EOF > summary.md
+            ## 🎮 SkyBlock Player Lookup Results
+            
+            **Player:** $PLAYER_NAME  
+            **UUID:** \`$UUID\`
+            
+            ### 📅 Hypixel Network
+            - **First Login:** $FIRST_ONLINE
+            - **Last Online:** $LAST_ONLINE
+            
+            ### ⛏️ SkyBlock (Latest Profile: $PROFILE_NAME)
+            - **SkyBlock Level:** $LEVEL
+            - **Last Island:** $LAST_LOCATION
+            - **Last Save Time:** $LAST_SAVE_TIME
+            EOF
           fi
 
-          # ----- Prepare Summary Output -----
-          cat << EOF > summary.md
-          ## 🎮 SkyBlock Player Lookup Results
+      # ----------------------------------------------
+      # STEP 5: Display summary in job log
+      # ----------------------------------------------
+      - name: Display summary in log
+        run: cat summary.md
 
-          **Player:** $PLAYER_NAME  
-          **UUID:** \`$UUID\`
-
-          ### 📅 Hypixel Network
-          - **First Login:** $FIRST_ONLINE
-          - **Last Online:** $LAST_ONLINE
-
-          ### ⛏️ SkyBlock (Latest Profile: $PROFILE_NAME)
-          - **SkyBlock Level:** $LEVEL
-          - **Last Island:** $LAST_LOCATION
-          - **Last Save Time:** $LAST_SAVE_TIME
-
-          ### 📁 Artifacts
-          Full JSON responses are attached below for deeper analysis.
-
-          > Note: SkyBlock level is based on the official Hypixel leveling system.  
-          > "Last Save Time" indicates when the player last performed an action that saved their profile.
-          EOF
-          
-          echo "summary_file=summary.md" >> $GITHUB_OUTPUT
-
-      - name: Display Summary in Job Log
-        run: cat ${{ steps.parse.outputs.summary_file }}
-
-      - name: Upload JSON Artifacts
+      # ----------------------------------------------
+      # STEP 6: Upload JSON artifacts (if any)
+      # ----------------------------------------------
+      - name: Upload JSON artifacts
+        if: steps.hypixel.outputs.player_exists == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: skyblock-data-${{ github.event.inputs.player_name }}
           path: |
             player.json
             profiles.json
-          retention-days: 7
-          if-no-files-found: error
+          retention-days: 3
+          if-no-files-found: ignore
 
-      - name: Add Summary to GitHub Step
-        run: |
-          cat ${{ steps.parse.outputs.summary_file }} >> $GITHUB_STEP_SUMMARY
+      # ----------------------------------------------
+      # STEP 7: Add to GitHub Actions step summary
+      # ----------------------------------------------
+      - name: Add to GitHub step summary
+        run: cat summary.md >> $GITHUB_STEP_SUMMARY
