@@ -1,4 +1,4 @@
-name: SkyBlock Full Report (Working)
+name: SkyBlock Full Report with GUI Inventory
 
 on:
   workflow_dispatch:
@@ -12,17 +12,17 @@ jobs:
   generate-report:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Parse input
+      - name: Parse input (username or UUID)
         id: parse
         run: |
           INPUT="${{ github.event.inputs.player_input }}"
           if [[ "$INPUT" =~ ^[a-f0-9]{32}$ ]]; then
             echo "uuid=$INPUT" >> $GITHUB_OUTPUT
           else
-            RESPONSE=$(curl -s "https://api.mojang.com/users/profiles/minecraft/$INPUT")
+            RESPONSE=$(curl --max-time 10 -s "https://api.mojang.com/users/profiles/minecraft/$INPUT")
             UUID=$(echo "$RESPONSE" | jq -r '.id')
             if [ "$UUID" = "null" ] || [ -z "$UUID" ]; then
               echo "Invalid username"
@@ -31,7 +31,7 @@ jobs:
             echo "uuid=$UUID" >> $GITHUB_OUTPUT
           fi
 
-      - name: Fetch SkyBlock Profiles
+      - name: Fetch SkyBlock Profiles (v2)
         env:
           HYPIXEL_API_KEY: ${{ secrets.HYPIXEL_API_KEY }}
         run: |
@@ -40,7 +40,7 @@ jobs:
             -H "API-Key: $HYPIXEL_API_KEY" \
             "https://api.hypixel.net/v2/skyblock/profiles?key=$HYPIXEL_API_KEY&uuid=$UUID"
 
-      - name: Fetch Player Data
+      - name: Fetch Player Data (v2)
         env:
           HYPIXEL_API_KEY: ${{ secrets.HYPIXEL_API_KEY }}
         run: |
@@ -49,116 +49,131 @@ jobs:
             -H "API-Key: $HYPIXEL_API_KEY" \
             "https://api.hypixel.net/v2/player?key=$HYPIXEL_API_KEY&uuid=$UUID"
 
-      - name: Generate HTML Report
+      - name: Generate HTML Report (Python)
         run: |
           python3 << 'PYTHON_SCRIPT'
           import json
           import base64
           import struct
           from datetime import datetime, timezone
-          import sys
+          from collections import OrderedDict
 
-          # ---------- Simple NBT parser for Hypixel inventory ----------
-          def parse_inventory(base64_data):
-              """Return list of dicts {slot, id, count} or empty list on error."""
-              if not base64_data:
-                  return []
-              try:
-                  data = base64.b64decode(base64_data)
-                  if not data or data[0] != 10:  # TAG_Compound
-                      return []
-                  # Skip root compound name
-                  offset = 3  # tag(1) + length(2) of name
-                  items = []
-                  while offset < len(data):
-                      tag = data[offset]
-                      offset += 1
-                      if tag == 0:  # TAG_End
-                          break
-                      # read name length and name
-                      if offset + 2 > len(data):
-                          break
-                      name_len = struct.unpack('>H', data[offset:offset+2])[0]
-                      offset += 2 + name_len
-                      if tag == 9:  # TAG_List
+          # ---------- NBT parsing (pure Python, no dependencies) ----------
+          def read_nbt_string(data, offset):
+              length = struct.unpack('>H', data[offset:offset+2])[0]
+              offset += 2
+              string = data[offset:offset+length].decode('utf-8')
+              return string, offset + length
+
+          def parse_nbt_payload(data, offset, end_offset, depth=0):
+              items = OrderedDict()
+              while offset < end_offset:
+                  if depth > 100:  # safety
+                      break
+                  tag_type = data[offset]
+                  offset += 1
+                  if tag_type == 0:  # TAG_End
+                      break
+                  # read name
+                  try:
+                      name, offset = read_nbt_string(data, offset)
+                  except:
+                      break
+                  # read value based on type
+                  try:
+                      if tag_type == 1:   # TAG_Byte
+                          value = struct.unpack('b', data[offset:offset+1])[0]
+                          offset += 1
+                      elif tag_type == 2: # TAG_Short
+                          value = struct.unpack('>h', data[offset:offset+2])[0]
+                          offset += 2
+                      elif tag_type == 3: # TAG_Int
+                          value = struct.unpack('>i', data[offset:offset+4])[0]
+                          offset += 4
+                      elif tag_type == 4: # TAG_Long
+                          value = struct.unpack('>q', data[offset:offset+8])[0]
+                          offset += 8
+                      elif tag_type == 5: # TAG_Float
+                          value = struct.unpack('>f', data[offset:offset+4])[0]
+                          offset += 4
+                      elif tag_type == 6: # TAG_Double
+                          value = struct.unpack('>d', data[offset:offset+8])[0]
+                          offset += 8
+                      elif tag_type == 7: # TAG_Byte_Array
+                          length = struct.unpack('>i', data[offset:offset+4])[0]
+                          offset += 4
+                          value = data[offset:offset+length]
+                          offset += length
+                      elif tag_type == 8: # TAG_String
+                          value, offset = read_nbt_string(data, offset)
+                      elif tag_type == 9: # TAG_List
                           list_type = data[offset]
                           offset += 1
-                          if offset + 4 > len(data):
-                              break
                           list_len = struct.unpack('>i', data[offset:offset+4])[0]
                           offset += 4
+                          list_items = []
                           for _ in range(list_len):
-                              if offset >= len(data):
+                              if list_type == 0:
                                   break
-                              # each item is a compound
-                              if data[offset] != 10:
-                                  break
-                              offset += 1
-                              # item name length (usually 0)
-                              name_len2 = struct.unpack('>H', data[offset:offset+2])[0]
-                              offset += 2 + name_len2
-                              # parse fields until TAG_End
-                              slot = 0
-                              item_id = ""
-                              count = 1
-                              while offset < len(data):
-                                  if data[offset] == 0:
-                                      offset += 1
-                                      break
-                                  field_tag = data[offset]
-                                  offset += 1
-                                  field_name_len = struct.unpack('>H', data[offset:offset+2])[0]
-                                  offset += 2 + field_name_len
-                                  if field_tag == 3:  # TAG_Int
-                                      if offset + 4 > len(data):
-                                          break
-                                      val = struct.unpack('>i', data[offset:offset+4])[0]
-                                      offset += 4
-                                      if field_name_len == 4 and data[offset-6:offset-2] == b'Slot':
-                                          slot = val
-                                  elif field_tag == 8:  # TAG_String
-                                      str_len = struct.unpack('>H', data[offset:offset+2])[0]
-                                      offset += 2
-                                      val = data[offset:offset+str_len].decode('utf-8')
-                                      offset += str_len
-                                      if field_name_len == 2 and data[offset-4:offset-2] == b'id':
-                                          item_id = val
-                                  elif field_tag == 1:  # TAG_Byte
-                                      val = struct.unpack('b', data[offset:offset+1])[0]
-                                      offset += 1
-                                      if field_name_len == 5 and data[offset-7:offset-2] == b'Count':
-                                          count = val
-                                  else:
-                                      # skip unknown field values
-                                      if field_tag == 1: offset += 1
-                                      elif field_tag == 2: offset += 2
-                                      elif field_tag == 3: offset += 4
-                                      elif field_tag == 4: offset += 8
-                                      elif field_tag == 5: offset += 4
-                                      elif field_tag == 6: offset += 8
-                                      elif field_tag == 8:
-                                          str_len = struct.unpack('>H', data[offset:offset+2])[0]
-                                          offset += 2 + str_len
-                                      else:
-                                          # skip complex
-                                          break
-                              if item_id:
-                                  items.append({'slot': slot, 'id': item_id, 'count': count})
-                      return items
-                  except Exception as e:
-                      print(f"Debug: inventory parse error: {e}", file=sys.stderr)
+                              sub_val, offset = parse_nbt_payload(data, offset, end_offset, depth+1)
+                              list_items.append(sub_val)
+                          value = list_items
+                      elif tag_type == 10: # TAG_Compound
+                          value, offset = parse_nbt_payload(data, offset, end_offset, depth+1)
+                      else:
+                          # unknown tag, skip
+                          break
+                  except:
+                      break
+                  items[name] = value
+              return items, offset
+
+          def parse_nbt(data_bytes):
+              if not data_bytes or data_bytes[0] != 10:
+                  return {}
+              try:
+                  offset = 1
+                  name, offset = read_nbt_string(data_bytes, offset)
+                  result, offset = parse_nbt_payload(data_bytes, offset, len(data_bytes))
+                  return result
+              except Exception:
+                  return {}
+
+          def decode_inventory(b64_data):
+              if not b64_data:
+                  return []
+              try:
+                  data_bytes = base64.b64decode(b64_data)
+                  nbt = parse_nbt(data_bytes)
+                  items_raw = nbt.get('i', [])
+                  if not isinstance(items_raw, list):
                       return []
-              except Exception as e:
-                  print(f"Debug: base64 decode error: {e}", file=sys.stderr)
+                  slot_items = []
+                  for entry in items_raw:
+                      if not isinstance(entry, dict):
+                          continue
+                      slot = entry.get('Slot', 0)
+                      if isinstance(slot, dict):
+                          slot = slot.get('value', 0)
+                      item_id = entry.get('id', '')
+                      if isinstance(item_id, dict):
+                          item_id = item_id.get('value', '')
+                      count = entry.get('Count', 1)
+                      if isinstance(count, dict):
+                          count = count.get('value', 1)
+                      if item_id:
+                          slot_items.append({'slot': int(slot), 'id': str(item_id), 'count': int(count)})
+                  return slot_items
+              except Exception:
                   return []
 
-          # ---------- Load data ----------
+          # ---------- Load JSON data ----------
           with open('skyblock_profiles.json') as f:
               profiles_data = json.load(f)
           with open('player_data.json') as f:
               player_data = json.load(f)
 
-          # Player info
+          # ---------- Player info ----------
           player = player_data.get('player', {})
           displayname = player.get('displayname', 'Unknown')
           uuid = player.get('uuid', '')
@@ -169,7 +184,7 @@ jobs:
           achievement_points = player.get('achievementPoints', 0)
           rank = player.get('newPackageRank', 'NONE')
           if rank == 'MVP_PLUS':
-              rank = 'MVP+'
+              rank = 'MVP+' + (f" {player.get('rankPlusColor', '')}" if player.get('rankPlusColor') else '')
           elif rank == 'MVP':
               rank = 'MVP'
           elif rank == 'VIP_PLUS':
@@ -185,7 +200,7 @@ jobs:
           first_login_str = format_time(first_login)
           last_login_str = format_time(last_login)
 
-          # Find selected profile
+          # ---------- Selected profile ----------
           profiles = profiles_data.get('profiles', [])
           selected_profile = None
           for p in profiles:
@@ -200,20 +215,26 @@ jobs:
               members = selected_profile.get('members', {})
               member_data = members.get(uuid, {})
 
-          # Debug: print available keys (visible in workflow log)
-          print(f"Debug: Selected profile: {selected_profile.get('cute_name', 'Unknown') if selected_profile else 'None'}")
-          print(f"Debug: Member data keys: {list(member_data.keys())[:10]}...")
-
           # ---------- Helper ----------
-          def fmt(n):
+          def fmt(val):
+              if isinstance(val, dict):
+                  if 'current' in val:
+                      val = val['current']
+                  elif 'value' in val:
+                      val = val['value']
+                  else:
+                      for v in val.values():
+                          if isinstance(v, (int, float)):
+                              val = v
+                              break
               try:
-                  return f"{int(n):,}"
+                  return f"{int(val):,}"
               except:
-                  return str(n)
+                  return str(val)
 
           # ---------- Skills ----------
           skills = member_data.get('experience', {})
-          skill_names = {
+          skill_display = {
               'SKILL_COMBAT': 'Combat', 'SKILL_TAMING': 'Taming',
               'SKILL_ENCHANTING': 'Enchanting', 'SKILL_MINING': 'Mining',
               'SKILL_FARMING': 'Farming', 'SKILL_ALCHEMY': 'Alchemy',
@@ -222,16 +243,15 @@ jobs:
               'SKILL_HUNTING': 'Hunting', 'SKILL_SOCIAL': 'Social'
           }
           skill_list = []
-          for sk, name in skill_names.items():
+          for sk, name in skill_display.items():
               xp = skills.get(sk, 0)
               if xp == 0:
                   continue
-              # approximate level
               if name in ['Combat', 'Enchanting', 'Mining']:
-                  level = min(60, int((xp / 14_000_000) * 60)) if xp < 14_000_000 else 60
+                  level = min(60, int((xp / 14e6) * 60)) if xp < 14e6 else 60
               else:
-                  level = min(50, int((xp / 12_000_000) * 50)) if xp < 12_000_000 else 50
-              percent = min(100, (xp / 111_672_500) * 100) if name not in ['Runecrafting', 'Hunting', 'Social'] else min(100, (xp / 20_000_000) * 100)
+                  level = min(50, int((xp / 12e6) * 50)) if xp < 12e6 else 50
+              percent = min(100, (xp / 111672500) * 100) if name not in ['Runecrafting', 'Hunting', 'Social'] else min(100, (xp / 20000000) * 100)
               skill_list.append((name, xp, level, percent))
 
           # ---------- Slayer ----------
@@ -239,7 +259,7 @@ jobs:
           slayer_list = []
           for boss, data in slayer.items():
               xp = data.get('xp', 0)
-              percent = min(100, (xp / 10_000_000) * 100) if xp < 10_000_000 else 100
+              percent = min(100, (xp / 10000000) * 100) if xp < 10000000 else 100
               slayer_list.append((
                   boss.capitalize(),
                   xp,
@@ -268,37 +288,34 @@ jobs:
 
           # ---------- Collections ----------
           collections = member_data.get('collection', {})
-          top_collections = sorted(collections.items(), key=lambda x: x[1], reverse=True)[:30]
+          all_collections = sorted(collections.items(), key=lambda x: x[1], reverse=True)[:30]
 
-          # ---------- Inventory ----------
+          # ---------- Inventory (Base64) ----------
           def get_bag_data(*keys):
-              d = member_data
+              data = member_data
               for k in keys:
-                  d = d.get(k, {})
-              return d.get('data', '')
+                  data = data.get(k, {})
+              return data.get('data', '')
 
           inv_b64 = get_bag_data('inv_contents')
           ender_b64 = get_bag_data('ender_chest_contents')
           armor_b64 = get_bag_data('inv_armor')
 
-          inv_items = parse_inventory(inv_b64)
-          ender_items = parse_inventory(ender_b64)
-          armor_items = parse_inventory(armor_b64)
+          inv_items = decode_inventory(inv_b64)
+          ender_items = decode_inventory(ender_b64)
+          armor_items = decode_inventory(armor_b64)
 
-          # Debug inventory
-          print(f"Debug: inv_items count: {len(inv_items)}")
-          if inv_items:
-              print(f"Debug: first item: {inv_items[0]}")
-
-          def render_grid(items, rows, cols):
-              slot_map = {i['slot']: i for i in items}
+          def render_inventory_grid(items, rows, cols):
+              slot_map = {item['slot']: item for item in items}
               html = '<div class="inventory-grid">'
-              for idx in range(rows * cols):
-                  item = slot_map.get(idx)
+              for i in range(rows * cols):
+                  item = slot_map.get(i)
                   if item:
-                      name = item['id'].split(':')[-1].replace('_', ' ').title()
+                      item_name = item['id'].split(':')[-1].replace('_', ' ').title()
+                      if not item_name:
+                          item_name = "Item"
                       count = item['count']
-                      html += f'<div class="inventory-slot"><div class="item-name">{name}</div><div class="item-count">{count}</div></div>'
+                      html += f'<div class="inventory-slot"><div class="item-name">{item_name}</div><div class="item-count">{count}</div></div>'
                   else:
                       html += '<div class="inventory-slot empty"><div class="item-name">Empty</div></div>'
               html += '</div>'
@@ -339,16 +356,17 @@ jobs:
           # ---------- SkyBlock Level ----------
           sb_level = member_data.get('leveling', {}).get('experience', 0)
           if sb_level == 0:
-              sb_level = sum(lvl for _, _, lvl, _ in skill_list) * 2
+              sb_level = sum([lvl for _, _, lvl, _ in skill_list]) * 2
 
           # ---------- Build HTML ----------
           html = f'''<!DOCTYPE html>
           <html lang="en">
           <head>
               <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
               <title>SkyBlock Report · {displayname}</title>
               <style>
-                  * {{ margin:0; padding:0; box-sizing:border-box; }}
+                  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
                   body {{
                       background: #0b1120;
                       font-family: 'Segoe UI', system-ui, sans-serif;
@@ -356,10 +374,11 @@ jobs:
                       color: #e2e8f0;
                   }}
                   .container {{
-                      max-width: 1400px;
+                      max-width: 1600px;
                       margin: 0 auto;
                       background: #0f172ad9;
                       border-radius: 2rem;
+                      backdrop-filter: blur(2px);
                       border: 1px solid #2d3a5e;
                       overflow: hidden;
                   }}
@@ -381,7 +400,7 @@ jobs:
                       flex-wrap: wrap;
                       background: #0f172a;
                       border-bottom: 1px solid #1e2a44;
-                      padding: 0.5rem 1.5rem 0;
+                      padding: 0.5rem 1.5rem 0 1.5rem;
                       gap: 0.25rem;
                   }}
                   .tab-btn {{
@@ -401,10 +420,21 @@ jobs:
                       color: #facc15;
                       box-shadow: 0 -2px 0 #facc15 inset;
                   }}
-                  .tab-content {{ display: none; padding: 2rem 1.8rem; animation: fade 0.2s; }}
+                  .tab-content {{
+                      display: none;
+                      padding: 2rem 1.8rem;
+                      animation: fade 0.2s ease;
+                  }}
                   .tab-content.active {{ display: block; }}
-                  @keyframes fade {{ from {{ opacity:0; transform:translateY(6px); }} to {{ opacity:1; transform:translateY(0); }} }}
-                  .stat-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 1.2rem; }}
+                  @keyframes fade {{
+                      from {{ opacity: 0; transform: translateY(6px); }}
+                      to {{ opacity: 1; transform: translateY(0); }}
+                  }}
+                  .stat-grid {{
+                      display: grid;
+                      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+                      gap: 1.2rem;
+                  }}
                   .card {{
                       background: #111827cc;
                       border-radius: 1.2rem;
@@ -437,6 +467,13 @@ jobs:
                       height: 100%;
                       border-radius: 12px;
                   }}
+                  .badge {{
+                      background: #facc1522;
+                      color: #facc15;
+                      padding: 0.2rem 0.6rem;
+                      border-radius: 20px;
+                      font-size: 0.7rem;
+                  }}
                   .inventory-grid {{
                       display: grid;
                       grid-template-columns: repeat(9, 1fr);
@@ -455,19 +492,21 @@ jobs:
                       flex-direction: column;
                       align-items: center;
                       justify-content: center;
-                      font-size: 0.6rem;
+                      font-size: 0.65rem;
                       text-align: center;
                       padding: 4px;
                   }}
-                  .inventory-slot.empty {{ opacity: 0.5; }}
-                  .item-name {{ font-size: 0.6rem; word-break: break-word; }}
-                  .item-count {{ font-size: 0.65rem; font-weight: bold; margin-top: 2px; }}
-                  .badge {{
-                      background: #facc1522;
-                      color: #facc15;
-                      padding: 0.2rem 0.6rem;
-                      border-radius: 20px;
-                      font-size: 0.7rem;
+                  .inventory-slot.empty {{
+                      opacity: 0.5;
+                  }}
+                  .item-name {{
+                      font-size: 0.6rem;
+                      word-break: break-word;
+                  }}
+                  .item-count {{
+                      font-size: 0.65rem;
+                      font-weight: bold;
+                      margin-top: 2px;
                   }}
                   footer {{
                       text-align: center;
@@ -476,6 +515,7 @@ jobs:
                       border-top: 1px solid #1e2a44;
                       color: #5b6e8c;
                   }}
+                  a {{ color: #facc15; }}
               </style>
           </head>
           <body>
@@ -497,10 +537,11 @@ jobs:
                   <button class="tab-btn" data-tab="inventory">🎒 Inventory</button>
               </div>
 
+              <!-- General Tab -->
               <div id="general" class="tab-content active">
                   <div class="stat-grid">
                       <div class="card">
-                          <h3>📊 General</h3>
+                          <h3>📊 General Stats</h3>
                           <div class="stat-row"><span>Network Level</span><span>{int(network_exp/100000) if network_exp else 0}</span></div>
                           <div class="stat-row"><span>Achievement Points</span><span>{achievement_points}</span></div>
                           <div class="stat-row"><span>Karma</span><span>{fmt(karma)}</span></div>
@@ -520,6 +561,7 @@ jobs:
                   </div>
               </div>
 
+              <!-- Skills Tab -->
               <div id="skills" class="tab-content">
                   <div class="card"><h3>⚔️ Skills</h3>'''
           for name, xp, lvl, percent in skill_list:
@@ -530,6 +572,7 @@ jobs:
                       </div>'''
           html += '</div></div>'
 
+          # Slayer Tab
           html += '<div id="slayer" class="tab-content"><div class="card"><h3>🧪 Slayer</h3>'
           for boss, xp, t4, t5, lvl, percent in slayer_list:
               html += f'''
@@ -539,6 +582,7 @@ jobs:
                       </div>'''
           html += '</div></div>'
 
+          # Dungeons Tab
           html += f'''
               <div id="dungeons" class="tab-content">
                   <div class="stat-grid">
@@ -557,6 +601,7 @@ jobs:
                   </div>
               </div>'''
 
+          # Mining Tab
           html += f'''
               <div id="mining" class="tab-content">
                   <div class="stat-grid">
@@ -573,6 +618,7 @@ jobs:
                   </div>
               </div>'''
 
+          # Rift Tab
           html += f'''
               <div id="rift" class="tab-content">
                   <div class="card">
@@ -584,6 +630,7 @@ jobs:
                   </div>
               </div>'''
 
+          # Pets Tab
           html += '<div id="pets" class="tab-content"><div class="card"><h3>🐾 Top 15 Pets</h3>'
           for p in top_pets[:15]:
               pet_type = p.get('type', 'Unknown').replace('_', ' ').title()
@@ -593,12 +640,14 @@ jobs:
               html += f'<div class="stat-row"><span>{pet_type}</span><span>Lvl {pet_level}M | {pet_tier}</span></div>'
           html += '</div></div>'
 
+          # Collections Tab
           html += '<div id="collections" class="tab-content"><div class="card"><h3>📦 Top 30 Collections</h3>'
-          for item, amount in top_collections[:30]:
+          for item, amount in all_collections[:30]:
               item_name = item.replace('_', ' ').title()
               html += f'<div class="stat-row"><span>{item_name}</span><span>{fmt(amount)}</span></div>'
           html += '</div></div>'
 
+          # Accessories Tab
           html += f'''
               <div id="accessories" class="tab-content">
                   <div class="card">
@@ -610,23 +659,24 @@ jobs:
                   </div>
               </div>'''
 
+          # Inventory Tab
           html += f'''
               <div id="inventory" class="tab-content">
                   <div class="card">
                       <h3>🎒 Inventory (Main)</h3>
-                      {render_grid(inv_items, 5, 9)}
+                      {render_inventory_grid(inv_items, 5, 9)}
                   </div>
                   <div class="card">
                       <h3>📦 Ender Chest</h3>
-                      {render_grid(ender_items, 5, 9)}
+                      {render_inventory_grid(ender_items, 5, 9)}
                   </div>
                   <div class="card">
                       <h3>🛡️ Armor & Equipment</h3>
-                      {render_grid(armor_items, 1, 4)}
+                      {render_inventory_grid(armor_items, 1, 4)}
                   </div>
-                  <div class="badge">🔐 Items are decoded from NBT. Missing icons? Use external NBT viewer.</div>
+                  <div class="badge">🔐 Items are decoded from NBT data.</div>
               </div>
-              <footer>Generated from Hypixel API (v2) · {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</footer>
+              <footer>Generated from Hypixel API (v2) · Data as of {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</footer>
           </div>
           <script>
               document.querySelectorAll('.tab-btn').forEach(btn => {{
@@ -656,7 +706,7 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-      - name: Upload raw JSON (debug)
+      - name: Upload raw JSON (optional)
         uses: actions/upload-artifact@v4
         with:
           name: raw-json-files-${{ github.event.inputs.player_input }}
@@ -664,3 +714,4 @@ jobs:
             skyblock_profiles.json
             player_data.json
           retention-days: 3
+          if-no-files-found: ignore
