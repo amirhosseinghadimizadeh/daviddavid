@@ -1,0 +1,114 @@
+name: Get Hypixel SkyBlock Level
+
+on:
+  workflow_dispatch:
+    inputs:
+      player_uuid:
+        description: 'UUID of the Minecraft player (dashed or without dashes)'
+        required: true
+        type: string
+
+jobs:
+  fetch-level:
+    runs-on: ubuntu-latest
+    outputs:
+      level: ${{ steps.extract.outputs.level }}
+      error: ${{ steps.extract.outputs.error }}
+    steps:
+      - name: Normalize and validate UUID
+        id: validate
+        run: |
+          UUID_RAW="${{ github.event.inputs.player_uuid }}"
+          # Remove dashes and convert to lowercase
+          UUID_CLEAN=$(echo "$UUID_RAW" | tr -d '-' | tr '[:upper:]' '[:lower:]')
+          if [[ ! "$UUID_CLEAN" =~ ^[a-f0-9]{32}$ ]]; then
+            echo "error=Invalid UUID: must be 32 hexadecimal characters (with or without dashes)" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "uuid=$UUID_CLEAN" >> "$GITHUB_OUTPUT"
+
+      - name: Call Hypixel API (v2)
+        id: api
+        env:
+          HYPIXEL_API_KEY: ${{ secrets.HYPIXEL_API_KEY }}
+        run: |
+          if [ -z "$HYPIXEL_API_KEY" ]; then
+            echo "error=HYPIXEL_API_KEY secret not set" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          UUID="${{ steps.validate.outputs.uuid }}"
+          RESPONSE=$(curl -s -w "\n%{http_code}" "https://api.hypixel.net/v2/skyblock/profiles?key=$HYPIXEL_API_KEY&uuid=$UUID")
+          HTTP_BODY=$(echo "$RESPONSE" | head -n -1)
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -n 1)
+
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "error=HTTP $HTTP_STATUS from Hypixel API" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Check API success flag
+          SUCCESS=$(echo "$HTTP_BODY" | jq -r '.success')
+          if [ "$SUCCESS" != "true" ]; then
+            CAUSE=$(echo "$HTTP_BODY" | jq -r '.cause // "Unknown error"')
+            echo "error=Hypixel API error: $CAUSE" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Save response for next step
+          echo "$HTTP_BODY" > hypixel_response.json
+          echo "response_file=hypixel_response.json" >> "$GITHUB_OUTPUT"
+
+      - name: Extract SkyBlock level
+        id: extract
+        run: |
+          RESPONSE_FILE="${{ steps.api.outputs.response_file }}"
+          UUID="${{ steps.validate.outputs.uuid }}"
+
+          # Count profiles
+          PROFILE_COUNT=$(jq '.profiles | length' "$RESPONSE_FILE")
+          if [ "$PROFILE_COUNT" -eq 0 ]; then
+            echo "error=Player has no SkyBlock profiles" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Find best profile: selected first, otherwise the one with highest last_save
+          PROFILE=$(jq -c --arg uuid "$UUID" '
+            .profiles | 
+            (.[] | select(.selected == true)) as $selected |
+            if $selected then $selected
+            else max_by(.members[$uuid].last_save // 0)
+            end
+          ' "$RESPONSE_FILE")
+
+          if [ -z "$PROFILE" ] || [ "$PROFILE" = "null" ]; then
+            echo "error=No accessible profile found" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Extract level from leveling.level or compute from experience
+          LEVEL=$(echo "$PROFILE" | jq -r --arg uuid "$UUID" '
+            .members[$uuid].leveling.level // 
+            (if .members[$uuid].leveling.experience > 0 then
+              ((2 * .members[$uuid].leveling.experience / 100 + 0.25) | sqrt) - 0.5
+            else empty end)
+          ')
+
+          if [ -z "$LEVEL" ] || [ "$LEVEL" = "null" ]; then
+            echo "error=No leveling data found for this player" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Round to 2 decimal places
+          LEVEL_ROUNDED=$(printf "%.2f" "$LEVEL")
+          echo "level=$LEVEL_ROUNDED" >> "$GITHUB_OUTPUT"
+          echo "error=" >> "$GITHUB_OUTPUT"
+
+      - name: Display result
+        run: |
+          if [ -n "${{ steps.extract.outputs.error }}" ]; then
+            echo "❌ Error: ${{ steps.extract.outputs.error }}"
+            exit 1
+          else
+            echo "✅ SkyBlock Level: ${{ steps.extract.outputs.level }}"
+          fi
