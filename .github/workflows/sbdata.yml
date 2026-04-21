@@ -19,37 +19,28 @@ jobs:
         id: parse
         run: |
           INPUT="${{ github.event.inputs.player_input }}"
-          # Check if input is a 32-character hex string (UUID without dashes)
           if [[ "$INPUT" =~ ^[a-f0-9]{32}$ ]]; then
-            echo "Input is a valid UUID"
             echo "uuid=$INPUT" >> $GITHUB_OUTPUT
-            echo "is_username=false" >> $GITHUB_OUTPUT
           else
-            # Assume it's a username, convert via Mojang API
-            echo "Input is a username, converting to UUID..."
             RESPONSE=$(curl --max-time 10 -s "https://api.mojang.com/users/profiles/minecraft/$INPUT")
             UUID=$(echo "$RESPONSE" | jq -r '.id')
             if [ "$UUID" = "null" ] || [ -z "$UUID" ]; then
-              echo "Invalid username: $INPUT"
+              echo "Invalid username"
               exit 1
             fi
             echo "uuid=$UUID" >> $GITHUB_OUTPUT
-            echo "is_username=true" >> $GITHUB_OUTPUT
-            echo "username=$INPUT" >> $GITHUB_OUTPUT
           fi
 
-      - name: Fetch SkyBlock Profiles (v2)
+      - name: Fetch SkyBlock Profiles
         env:
           HYPIXEL_API_KEY: ${{ secrets.HYPIXEL_API_KEY }}
         run: |
           UUID="${{ steps.parse.outputs.uuid }}"
-          echo "Fetching SkyBlock profiles for UUID: $UUID"
           curl -s -o skyblock_profiles.json \
             -H "API-Key: $HYPIXEL_API_KEY" \
             "https://api.hypixel.net/v2/skyblock/profiles?key=$HYPIXEL_API_KEY&uuid=$UUID"
-          echo "✅ Saved skyblock_profiles.json"
 
-      - name: Fetch Player Data (v2)
+      - name: Fetch Player Data
         env:
           HYPIXEL_API_KEY: ${{ secrets.HYPIXEL_API_KEY }}
         run: |
@@ -57,27 +48,23 @@ jobs:
           curl -s -o player_data.json \
             -H "API-Key: $HYPIXEL_API_KEY" \
             "https://api.hypixel.net/v2/player?key=$HYPIXEL_API_KEY&uuid=$UUID"
-          echo "✅ Saved player_data.json"
 
-      - name: Generate HTML report
+      - name: Generate HTML Report
         run: |
           python3 << 'PYTHON_SCRIPT'
           import json
-          import os
           from datetime import datetime, timezone
 
-          # Load data
+          # ---------- Load data ----------
           with open('skyblock_profiles.json') as f:
               profiles_data = json.load(f)
           with open('player_data.json') as f:
               player_data = json.load(f)
 
-          # Extract player info
+          # ---------- Player info ----------
           player = player_data.get('player', {})
           displayname = player.get('displayname', 'Unknown')
           uuid = player.get('uuid', '')
-          if not uuid:
-              uuid = "${{ steps.parse.outputs.uuid }}"
           first_login = player.get('firstLogin', 0)
           last_login = player.get('lastLogin', 0)
           network_exp = player.get('networkExp', 0)
@@ -101,7 +88,7 @@ jobs:
           first_login_str = format_time(first_login)
           last_login_str = format_time(last_login)
 
-          # Find selected profile
+          # ---------- Selected profile ----------
           profiles = profiles_data.get('profiles', [])
           selected_profile = None
           for p in profiles:
@@ -116,11 +103,23 @@ jobs:
               members = selected_profile.get('members', {})
               member_data = members.get(uuid, {})
 
-          # Helper to format large numbers
-          def fmt(n):
-              return f"{int(n):,}" if n else "0"
+          # ---------- Safe number formatter ----------
+          def fmt(val):
+              if isinstance(val, dict):
+                  # try to extract 'current' or first numeric value
+                  if 'current' in val:
+                      val = val['current']
+                  else:
+                      for v in val.values():
+                          if isinstance(v, (int, float)):
+                              val = v
+                              break
+              try:
+                  return f"{int(val):,}"
+              except:
+                  return str(val)
 
-          # Skills
+          # ---------- Skills ----------
           skills = member_data.get('experience', {})
           skill_map = {
               'SKILL_COMBAT': 'Combat',
@@ -147,7 +146,7 @@ jobs:
                       level = min(50, int((xp / 12e6) * 50)) if xp < 12e6 else 50
               skill_levels.append((name, xp, level))
 
-          # Slayer
+          # ---------- Slayer ----------
           slayer = member_data.get('slayer', {}).get('slayer_bosses', {})
           slayer_list = []
           for boss, data in slayer.items():
@@ -159,41 +158,57 @@ jobs:
                   len(data.get('claimed_levels', {}))
               ))
 
-          # Currencies
+          # ---------- Currencies (fix essence) ----------
           coin_purse = member_data.get('currencies', {}).get('coin_purse', 0)
           bank_balance = member_data.get('banking', {}).get('balance', 0)
           motes = member_data.get('currencies', {}).get('motes_purse', 0)
           soulflow = member_data.get('item_data', {}).get('soulflow', 0)
           essence = member_data.get('currencies', {}).get('essence', {})
 
-          # Pets
+          def get_essence(ess, typ):
+              val = ess.get(typ, 0)
+              if isinstance(val, dict):
+                  return val.get('current', 0)
+              return val
+
+          diamond_essence = get_essence(essence, 'DIAMOND')
+          gold_essence = get_essence(essence, 'GOLD')
+
+          # ---------- Pets ----------
           pets = member_data.get('pets_data', {}).get('pets', [])
           top_pets = sorted(pets, key=lambda x: x.get('exp', 0), reverse=True)[:10]
 
-          # Collections
+          # ---------- Collections ----------
           collections = member_data.get('collection', {})
           top_collections = sorted(collections.items(), key=lambda x: x[1], reverse=True)[:10]
 
-          # Inventory (base64)
-          inv_contents = member_data.get('inv_contents', {}).get('data', '')
-          ender_chest = member_data.get('ender_chest_contents', {}).get('data', '')
-          armor = member_data.get('inv_armor', {}).get('data', '')
-          talisman_bag = member_data.get('bag_contents', {}).get('talisman_bag', {}).get('data', '')
-          quiver = member_data.get('bag_contents', {}).get('quiver', {}).get('data', '')
-          wardrobe = member_data.get('wardrobe_contents', {}).get('data', '')
-          sacks = member_data.get('bag_contents', {}).get('sacks_bag', {}).get('data', '')
-          potion_bag = member_data.get('bag_contents', {}).get('potion_bag', {}).get('data', '')
-          fishing_bag = member_data.get('bag_contents', {}).get('fishing_bag', {}).get('data', '')
-          personal_vault = member_data.get('personal_vault_contents', {}).get('data', '')
+          # ---------- Inventory (base64) ----------
+          def get_bag_data(path):
+              parts = path.split('.')
+              data = member_data
+              for p in parts:
+                  data = data.get(p, {})
+              return data.get('data', '')
 
-          # Rift
+          inv_contents = get_bag_data('inv_contents')
+          ender_chest = get_bag_data('ender_chest_contents')
+          armor = get_bag_data('inv_armor')
+          talisman_bag = get_bag_data('bag_contents.talisman_bag')
+          quiver = get_bag_data('bag_contents.quiver')
+          wardrobe = get_bag_data('wardrobe_contents')
+          sacks = get_bag_data('bag_contents.sacks_bag')
+          potion_bag = get_bag_data('bag_contents.potion_bag')
+          fishing_bag = get_bag_data('bag_contents.fishing_bag')
+          personal_vault = get_bag_data('personal_vault_contents')
+
+          # ---------- Rift ----------
           rift = member_data.get('rift', {})
           rift_motes = member_data.get('currencies', {}).get('motes_purse', 0)
           enigma_souls = len(rift.get('enigma', {}).get('found_souls', []))
           gallery_trophies = len(rift.get('gallery', {}).get('secured_trophies', []))
           rift_visits = rift.get('visits', 0)
 
-          # Dungeons
+          # ---------- Dungeons ----------
           dungeons = member_data.get('dungeons', {})
           catacombs = dungeons.get('dungeon_types', {}).get('catacombs', {})
           master_catacombs = dungeons.get('dungeon_types', {}).get('master_catacombs', {})
@@ -204,15 +219,15 @@ jobs:
           secrets = dungeons.get('secrets', 0)
           f7_completions = catacombs.get('tier_completions', {}).get('7', 0)
 
-          # Accessories
+          # ---------- Accessories ----------
           mp = member_data.get('accessory_bag_storage', {}).get('highest_magical_power', 0)
           selected_power = member_data.get('accessory_bag_storage', {}).get('selected_power', 'None')
           unlocked_powers = member_data.get('accessory_bag_storage', {}).get('unlocked_powers', [])
 
-          # Leveling
+          # ---------- SkyBlock Level ----------
           sb_level = member_data.get('leveling', {}).get('experience', 0)
 
-          # Build HTML using list join for performance
+          # ---------- Build HTML ----------
           html_lines = []
           html_lines.append(f'''<!DOCTYPE html>
           <html lang="en">
@@ -311,7 +326,7 @@ jobs:
               </header>
               <div class="stat-grid">''')
 
-          # General card
+          # General
           html_lines.append(f'''
                   <div class="card">
                       <h3>📊 General</h3>
@@ -331,7 +346,7 @@ jobs:
                       <div class="stat-row"><span>Bank</span><span>{fmt(bank_balance)}</span></div>
                       <div class="stat-row"><span>Motes</span><span>{fmt(motes)}</span></div>
                       <div class="stat-row"><span>Soulflow</span><span>{fmt(soulflow)}</span></div>
-                      <div class="stat-row"><span>Essence (Diamond/Gold)</span><span>{fmt(essence.get('DIAMOND', 0))} / {fmt(essence.get('GOLD', 0))}</span></div>
+                      <div class="stat-row"><span>Essence (Diamond/Gold)</span><span>{fmt(diamond_essence)} / {fmt(gold_essence)}</span></div>
                   </div>''')
 
           # Skills
@@ -367,7 +382,7 @@ jobs:
                       <div class="stat-row"><span>Rift Visits</span><span>{rift_visits}</span></div>
                   </div>''')
 
-          # Pets Top 5
+          # Top Pets
           html_lines.append('<div class="card"><h3>🐾 Top Pets</h3>')
           for p in top_pets[:5]:
               pet_type = p.get('type', 'Unknown').replace('_', ' ').title()
@@ -377,7 +392,7 @@ jobs:
               html_lines.append(f'<div class="stat-row"><span>{pet_type}</span><span>Lvl {pet_level}M | {pet_tier}</span></div>')
           html_lines.append('</div>')
 
-          # Collections Top 5
+          # Top Collections
           html_lines.append('<div class="card"><h3>📦 Top Collections</h3>')
           for item, amount in top_collections[:5]:
               item_name = item.replace('_', ' ').title()
@@ -393,7 +408,7 @@ jobs:
                       <div class="stat-row"><span>Unlocked Powers</span><span>{', '.join(unlocked_powers[:5])}{'...' if len(unlocked_powers) > 5 else ''}</span></div>
                   </div>''')
 
-          # Inventory Data (Base64)
+          # Inventory (Base64)
           def trunc(s, max_len=100):
               if not s:
                   return '(empty)'
@@ -420,7 +435,6 @@ jobs:
           </body>
           </html>''')
 
-          # Write final HTML
           with open('skyblock_report.html', 'w') as f:
               f.write('\n'.join(html_lines))
 
