@@ -1,0 +1,66 @@
+name: Download YouTube video via Invidious (Resilient)
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'YouTube video URL'
+        required: true
+        type: string
+      format:
+        description: 'yt-dlp format specifier (e.g., best, bestvideo+bestaudio, mp4)'
+        required: false
+        default: 'best'
+        type: string
+      output_filename:
+        description: 'Output file name (without extension)'
+        required: false
+        default: 'video'
+        type: string
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install yt-dlp
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install yt-dlp
+
+      - name: Download video with fallback instances
+        run: |
+          # List of Invidious instances to try
+          INSTANCES=(
+            "https://yewtu.be"
+            "https://inv.vern.cc"
+            "https://invidious.fdn.fr"
+            "https://inv.bp.projectsegfau.lt"
+          )
+
+          SUCCESS=false
+          for INSTANCE in "${INSTANCES[@]}"; do
+            echo "Trying instance: $INSTANCE"
+            if yt-dlp \
+              --extractor-args "invidious:url=$INSTANCE" \
+              -f "${{ github.event.inputs.format }}" \
+              -o "${{ github.event.inputs.output_filename }}.%(ext)s" \
+              "${{ github.event.inputs.video_url }}"; then
+              echo "Download successful with $INSTANCE"
+              SUCCESS=true
+              break
+            else
+              echo "Download failed with $INSTANCE, trying next..."
+            fi
+          done
+
+          if [ "$SUCCESS" = false ]; then
+            echo "All instances failed."
+            exit 1
+          fi
+
+      - name: Upload video as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloaded-video
+          path: ${{ github.event.inputs.output_filename }}.*
+          retention-days: 7
