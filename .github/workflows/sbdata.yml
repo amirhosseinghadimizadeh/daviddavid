@@ -1,10 +1,10 @@
-name: SkyBlock Full Report (HTML)
+name: SkyBlock Full Report (UUID/Username)
 
 on:
   workflow_dispatch:
     inputs:
-      player_name:
-        description: 'Minecraft username'
+      player_input:
+        description: 'Minecraft username OR UUID (32 chars, no dashes)'
         required: true
         type: string
 
@@ -15,45 +15,56 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Get UUID from Mojang
-        id: uuid
+      - name: Parse input (username or UUID)
+        id: parse
         run: |
-          USERNAME="${{ github.event.inputs.player_name }}"
-          RESPONSE=$(curl --max-time 10 -s "https://api.mojang.com/users/profiles/minecraft/$USERNAME")
-          UUID=$(echo "$RESPONSE" | jq -r '.id')
-          if [ "$UUID" = "null" ] || [ -z "$UUID" ]; then
-            echo "❌ Invalid username"
-            exit 1
+          INPUT="${{ github.event.inputs.player_input }}"
+          # Check if input is a 32-character hex string (UUID without dashes)
+          if [[ "$INPUT" =~ ^[a-f0-9]{32}$ ]]; then
+            echo "Input is a valid UUID"
+            echo "uuid=$INPUT" >> $GITHUB_OUTPUT
+            echo "is_username=false" >> $GITHUB_OUTPUT
+          else
+            # Assume it's a username, convert via Mojang API
+            echo "Input is a username, converting to UUID..."
+            RESPONSE=$(curl --max-time 10 -s "https://api.mojang.com/users/profiles/minecraft/$INPUT")
+            UUID=$(echo "$RESPONSE" | jq -r '.id')
+            if [ "$UUID" = "null" ] || [ -z "$UUID" ]; then
+              echo "Invalid username: $INPUT"
+              exit 1
+            fi
+            echo "uuid=$UUID" >> $GITHUB_OUTPUT
+            echo "is_username=true" >> $GITHUB_OUTPUT
+            echo "username=$INPUT" >> $GITHUB_OUTPUT
           fi
-          echo "uuid=$UUID" >> $GITHUB_OUTPUT
-          echo "✅ UUID: $UUID"
 
       - name: Fetch SkyBlock Profiles (v2)
         env:
           HYPIXEL_API_KEY: ${{ secrets.HYPIXEL_API_KEY }}
         run: |
-          UUID="${{ steps.uuid.outputs.uuid }}"
-          curl -s -H "API-Key: $HYPIXEL_API_KEY" \
-            "https://api.hypixel.net/v2/skyblock/profiles?key=$HYPIXEL_API_KEY&uuid=$UUID" \
-            > skyblock_profiles.json
+          UUID="${{ steps.parse.outputs.uuid }}"
+          echo "Fetching SkyBlock profiles for UUID: $UUID"
+          curl -s -o skyblock_profiles.json \
+            -H "API-Key: $HYPIXEL_API_KEY" \
+            "https://api.hypixel.net/v2/skyblock/profiles?key=$HYPIXEL_API_KEY&uuid=$UUID"
           echo "✅ Saved skyblock_profiles.json"
 
       - name: Fetch Player Data (v2)
         env:
           HYPIXEL_API_KEY: ${{ secrets.HYPIXEL_API_KEY }}
         run: |
-          UUID="${{ steps.uuid.outputs.uuid }}"
-          curl -s -H "API-Key: $HYPIXEL_API_KEY" \
-            "https://api.hypixel.net/v2/player?key=$HYPIXEL_API_KEY&uuid=$UUID" \
-            > player_data.json
+          UUID="${{ steps.parse.outputs.uuid }}"
+          curl -s -o player_data.json \
+            -H "API-Key: $HYPIXEL_API_KEY" \
+            "https://api.hypixel.net/v2/player?key=$HYPIXEL_API_KEY&uuid=$UUID"
           echo "✅ Saved player_data.json"
 
       - name: Generate HTML report
         run: |
-          python3 << 'EOF'
+          python3 << 'PYTHON_SCRIPT'
           import json
           import os
-          from datetime import datetime
+          from datetime import datetime, timezone
 
           # Load data
           with open('skyblock_profiles.json') as f:
@@ -65,6 +76,8 @@ jobs:
           player = player_data.get('player', {})
           displayname = player.get('displayname', 'Unknown')
           uuid = player.get('uuid', '')
+          if not uuid:
+              uuid = "${{ steps.parse.outputs.uuid }}"
           first_login = player.get('firstLogin', 0)
           last_login = player.get('lastLogin', 0)
           network_exp = player.get('networkExp', 0)
@@ -80,10 +93,9 @@ jobs:
           elif rank == 'VIP':
               rank = 'VIP'
 
-          # Format timestamps
           def format_time(ts):
               if ts and ts > 0:
-                  return datetime.utcfromtimestamp(ts/1000).strftime('%Y-%m-%d %H:%M:%S UTC')
+                  return datetime.fromtimestamp(ts/1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
               return 'Never'
 
           first_login_str = format_time(first_login)
@@ -104,15 +116,9 @@ jobs:
               members = selected_profile.get('members', {})
               member_data = members.get(uuid, {})
 
-          # Helper to get nested dict values safely
-          def get_nested(data, path, default=0):
-              keys = path.split('.')
-              for k in keys:
-                  if isinstance(data, dict):
-                      data = data.get(k, default)
-                  else:
-                      return default
-              return data
+          # Helper to format large numbers
+          def fmt(n):
+              return f"{int(n):,}" if n else "0"
 
           # Skills
           skills = member_data.get('experience', {})
@@ -130,28 +136,28 @@ jobs:
               'SKILL_HUNTING': 'Hunting',
               'SKILL_SOCIAL': 'Social'
           }
-          skill_levels = {}
+          skill_levels = []
           for sk, name in skill_map.items():
               xp = skills.get(sk, 0)
-              # approximate level (very rough, just for display)
               level = 0
               if xp > 0:
                   if name in ['Combat', 'Enchanting', 'Mining']:
                       level = min(60, int((xp / 14e6) * 60)) if xp < 14e6 else 60
                   else:
                       level = min(50, int((xp / 12e6) * 50)) if xp < 12e6 else 50
-              skill_levels[name] = {'xp': xp, 'level': level}
+              skill_levels.append((name, xp, level))
 
           # Slayer
           slayer = member_data.get('slayer', {}).get('slayer_bosses', {})
-          slayer_data = {}
+          slayer_list = []
           for boss, data in slayer.items():
-              slayer_data[boss.capitalize()] = {
-                  'xp': data.get('xp', 0),
-                  'kills_t4': data.get('boss_kills_tier_4', 0),
-                  'kills_t5': data.get('boss_kills_tier_5', 0),
-                  'level': len(data.get('claimed_levels', {}))
-              }
+              slayer_list.append((
+                  boss.capitalize(),
+                  data.get('xp', 0),
+                  data.get('boss_kills_tier_4', 0),
+                  data.get('boss_kills_tier_5', 0),
+                  len(data.get('claimed_levels', {}))
+              ))
 
           # Currencies
           coin_purse = member_data.get('currencies', {}).get('coin_purse', 0)
@@ -164,35 +170,51 @@ jobs:
           pets = member_data.get('pets_data', {}).get('pets', [])
           top_pets = sorted(pets, key=lambda x: x.get('exp', 0), reverse=True)[:10]
 
-          # Collections (first 10)
+          # Collections
           collections = member_data.get('collection', {})
           top_collections = sorted(collections.items(), key=lambda x: x[1], reverse=True)[:10]
 
-          # Inventory (base64 placeholders)
+          # Inventory (base64)
           inv_contents = member_data.get('inv_contents', {}).get('data', '')
           ender_chest = member_data.get('ender_chest_contents', {}).get('data', '')
           armor = member_data.get('inv_armor', {}).get('data', '')
           talisman_bag = member_data.get('bag_contents', {}).get('talisman_bag', {}).get('data', '')
           quiver = member_data.get('bag_contents', {}).get('quiver', {}).get('data', '')
           wardrobe = member_data.get('wardrobe_contents', {}).get('data', '')
+          sacks = member_data.get('bag_contents', {}).get('sacks_bag', {}).get('data', '')
+          potion_bag = member_data.get('bag_contents', {}).get('potion_bag', {}).get('data', '')
+          fishing_bag = member_data.get('bag_contents', {}).get('fishing_bag', {}).get('data', '')
+          personal_vault = member_data.get('personal_vault_contents', {}).get('data', '')
 
-          # Rift progress
+          # Rift
           rift = member_data.get('rift', {})
           rift_motes = member_data.get('currencies', {}).get('motes_purse', 0)
           enigma_souls = len(rift.get('enigma', {}).get('found_souls', []))
           gallery_trophies = len(rift.get('gallery', {}).get('secured_trophies', []))
+          rift_visits = rift.get('visits', 0)
 
           # Dungeons
           dungeons = member_data.get('dungeons', {})
           catacombs = dungeons.get('dungeon_types', {}).get('catacombs', {})
           master_catacombs = dungeons.get('dungeon_types', {}).get('master_catacombs', {})
-          cata_level = catacombs.get('experience', 0)
-          # rough level (0-50)
-          cata_level_num = min(50, int(cata_level / 15e6 * 50)) if cata_level < 15e6 else 50
+          cata_exp = catacombs.get('experience', 0)
+          cata_level = min(50, int(cata_exp / 15e6 * 50)) if cata_exp < 15e6 else 50
+          master_exp = master_catacombs.get('experience', 0)
+          master_level = min(50, int(master_exp / 20e6 * 50)) if master_exp < 20e6 else 50
           secrets = dungeons.get('secrets', 0)
+          f7_completions = catacombs.get('tier_completions', {}).get('7', 0)
 
-          # Build HTML
-          html = f'''<!DOCTYPE html>
+          # Accessories
+          mp = member_data.get('accessory_bag_storage', {}).get('highest_magical_power', 0)
+          selected_power = member_data.get('accessory_bag_storage', {}).get('selected_power', 'None')
+          unlocked_powers = member_data.get('accessory_bag_storage', {}).get('unlocked_powers', [])
+
+          # Leveling
+          sb_level = member_data.get('leveling', {}).get('experience', 0)
+
+          # Build HTML using list join for performance
+          html_lines = []
+          html_lines.append(f'''<!DOCTYPE html>
           <html lang="en">
           <head>
               <meta charset="UTF-8">
@@ -227,10 +249,10 @@ jobs:
                       -webkit-background-clip: text;
                       color: transparent;
                   }}
-                  .sub { color: #9ca3af; margin-top: 0.3rem; }
+                  .sub {{ color: #9ca3af; margin-top: 0.3rem; }}
                   .stat-grid {{
                       display: grid;
-                      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+                      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
                       gap: 1.2rem;
                       padding: 1.5rem;
                   }}
@@ -287,97 +309,128 @@ jobs:
                   <h1>⛏️ SkyBlock Report · {displayname}</h1>
                   <div class="sub">UUID: {uuid} | Rank: {rank} | First login: {first_login_str} | Last login: {last_login_str}</div>
               </header>
+              <div class="stat-grid">''')
 
-              <div class="stat-grid">
-                  <!-- General -->
+          # General card
+          html_lines.append(f'''
                   <div class="card">
                       <h3>📊 General</h3>
                       <div class="stat-row"><span>Network Level</span><span>{int(network_exp/100000) if network_exp else 0}</span></div>
                       <div class="stat-row"><span>Achievement Points</span><span>{achievement_points}</span></div>
-                      <div class="stat-row"><span>Karma</span><span>{karma:,}</span></div>
-                      <div class="stat-row"><span>SkyBlock Level</span><span>{member_data.get('leveling', {}).get('experience', 0)}</span></div>
-                      <div class="stat-row"><span>Magical Power</span><span>{member_data.get('accessory_bag_storage', {}).get('highest_magical_power', 0)}</span></div>
-                  </div>
+                      <div class="stat-row"><span>Karma</span><span>{fmt(karma)}</span></div>
+                      <div class="stat-row"><span>SkyBlock Level</span><span>{sb_level}</span></div>
+                      <div class="stat-row"><span>Magical Power</span><span>{mp}</span></div>
+                      <div class="stat-row"><span>Selected Power</span><span>{selected_power}</span></div>
+                  </div>''')
 
-                  <!-- Currencies -->
+          # Currencies
+          html_lines.append(f'''
                   <div class="card">
                       <h3>💰 Currencies</h3>
-                      <div class="stat-row"><span>Coin Purse</span><span>{coin_purse:,.0f}</span></div>
-                      <div class="stat-row"><span>Bank</span><span>{bank_balance:,.0f}</span></div>
-                      <div class="stat-row"><span>Motes</span><span>{motes:,}</span></div>
-                      <div class="stat-row"><span>Soulflow</span><span>{soulflow:,}</span></div>
-                      <div class="stat-row"><span>Essence (Diamond/Gold)</span><span>{essence.get('DIAMOND', 0):,} / {essence.get('GOLD', 0):,}</span></div>
-                  </div>
+                      <div class="stat-row"><span>Coin Purse</span><span>{fmt(coin_purse)}</span></div>
+                      <div class="stat-row"><span>Bank</span><span>{fmt(bank_balance)}</span></div>
+                      <div class="stat-row"><span>Motes</span><span>{fmt(motes)}</span></div>
+                      <div class="stat-row"><span>Soulflow</span><span>{fmt(soulflow)}</span></div>
+                      <div class="stat-row"><span>Essence (Diamond/Gold)</span><span>{fmt(essence.get('DIAMOND', 0))} / {fmt(essence.get('GOLD', 0))}</span></div>
+                  </div>''')
 
-                  <!-- Skills -->
-                  <div class="card">
-                      <h3>⚔️ Skills</h3>
-                      {''.join([f'<div class="stat-row"><span>{name}</span><span>Lvl {info["level"]} ({info["xp"]/1e6:.1f}M XP)</span></div>' for name, info in skill_levels.items() if info['xp'] > 0])}
-                  </div>
+          # Skills
+          html_lines.append('<div class="card"><h3>⚔️ Skills</h3>')
+          for name, xp, lvl in skill_levels:
+              if xp > 0:
+                  html_lines.append(f'<div class="stat-row"><span>{name}</span><span>Lvl {lvl} ({xp/1e6:.1f}M XP)</span></div>')
+          html_lines.append('</div>')
 
-                  <!-- Slayer -->
-                  <div class="card">
-                      <h3>🧪 Slayer</h3>
-                      {''.join([f'<div class="stat-row"><span>{boss}</span><span>XP {info["xp"]/1000:.1f}k | Lvl {info["level"]} | T4/T5 kills {info["kills_t4"]}/{info["kills_t5"]}</span></div>' for boss, info in slayer_data.items()])}
-                  </div>
+          # Slayer
+          html_lines.append('<div class="card"><h3>🧪 Slayer</h3>')
+          for boss, xp, t4, t5, lvl in slayer_list:
+              html_lines.append(f'<div class="stat-row"><span>{boss}</span><span>XP {xp/1000:.1f}k | Lvl {lvl} | T4/T5 kills {t4}/{t5}</span></div>')
+          html_lines.append('</div>')
 
-                  <!-- Dungeons -->
+          # Dungeons
+          html_lines.append(f'''
                   <div class="card">
                       <h3>🏰 Dungeons</h3>
-                      <div class="stat-row"><span>Catacombs Level</span><span>{cata_level_num}</span></div>
-                      <div class="stat-row"><span>Master Catacombs</span><span>{min(50, int(master_cacombs.get('experience', 0)/20e6*50)) if master_cacombs.get('experience',0) else 0}</span></div>
-                      <div class="stat-row"><span>Secrets Found</span><span>{secrets:,}</span></div>
-                      <div class="stat-row"><span>F7 Completions</span><span>{catacombs.get('tier_completions', {}).get('7', 0)}</span></div>
-                  </div>
+                      <div class="stat-row"><span>Catacombs Level</span><span>{cata_level}</span></div>
+                      <div class="stat-row"><span>Master Catacombs</span><span>{master_level}</span></div>
+                      <div class="stat-row"><span>Secrets Found</span><span>{fmt(secrets)}</span></div>
+                      <div class="stat-row"><span>F7 Completions</span><span>{fmt(f7_completions)}</span></div>
+                  </div>''')
 
-                  <!-- Rift -->
+          # Rift
+          html_lines.append(f'''
                   <div class="card">
                       <h3>🌀 Rift</h3>
-                      <div class="stat-row"><span>Motes</span><span>{rift_motes:,}</span></div>
+                      <div class="stat-row"><span>Motes</span><span>{fmt(rift_motes)}</span></div>
                       <div class="stat-row"><span>Enigma Souls</span><span>{enigma_souls}</span></div>
                       <div class="stat-row"><span>Gallery Trophies</span><span>{gallery_trophies}</span></div>
-                      <div class="stat-row"><span>Rift Visits</span><span>{rift.get('visits', 0)}</span></div>
-                  </div>
+                      <div class="stat-row"><span>Rift Visits</span><span>{rift_visits}</span></div>
+                  </div>''')
 
-                  <!-- Pets (Top 5) -->
+          # Pets Top 5
+          html_lines.append('<div class="card"><h3>🐾 Top Pets</h3>')
+          for p in top_pets[:5]:
+              pet_type = p.get('type', 'Unknown').replace('_', ' ').title()
+              pet_exp = p.get('exp', 0)
+              pet_level = int(pet_exp / 1e6) if pet_exp > 0 else 0
+              pet_tier = p.get('tier', 'Common')
+              html_lines.append(f'<div class="stat-row"><span>{pet_type}</span><span>Lvl {pet_level}M | {pet_tier}</span></div>')
+          html_lines.append('</div>')
+
+          # Collections Top 5
+          html_lines.append('<div class="card"><h3>📦 Top Collections</h3>')
+          for item, amount in top_collections[:5]:
+              item_name = item.replace('_', ' ').title()
+              html_lines.append(f'<div class="stat-row"><span>{item_name}</span><span>{fmt(amount)}</span></div>')
+          html_lines.append('</div>')
+
+          # Accessories
+          html_lines.append(f'''
                   <div class="card">
-                      <h3>🐾 Top Pets</h3>
-                      {''.join([f'<div class="stat-row"><span>{p.get("type", "Unknown").replace("_", " ").title()}</span><span>Lvl {int(p.get("exp", 0)/1e6)}M | {p.get("tier", "Common")}</span></div>' for p in top_pets[:5]])}
-                  </div>
+                      <h3>🔮 Accessories</h3>
+                      <div class="stat-row"><span>Magical Power</span><span>{mp}</span></div>
+                      <div class="stat-row"><span>Selected Power</span><span>{selected_power}</span></div>
+                      <div class="stat-row"><span>Unlocked Powers</span><span>{', '.join(unlocked_powers[:5])}{'...' if len(unlocked_powers) > 5 else ''}</span></div>
+                  </div>''')
 
-                  <!-- Collections Top 5 -->
-                  <div class="card">
-                      <h3>📦 Top Collections</h3>
-                      {''.join([f'<div class="stat-row"><span>{item.replace("_", " ").title()}</span><span>{amount:,}</span></div>' for item, amount in top_collections[:5]])}
-                  </div>
+          # Inventory Data (Base64)
+          def trunc(s, max_len=100):
+              if not s:
+                  return '(empty)'
+              return s[:max_len] + ('...' if len(s) > max_len else '')
 
-                  <!-- Inventory (Base64 placeholders) -->
+          html_lines.append(f'''
                   <div class="card">
                       <h3>🎒 Inventory Data (Base64)</h3>
-                      <div class="inventory-data"><strong>inv_contents:</strong> {inv_contents[:100]}{'...' if len(inv_contents)>100 else ''}</div>
-                      <div class="inventory-data"><strong>ender_chest:</strong> {ender_chest[:100]}{'...' if len(ender_chest)>100 else ''}</div>
-                      <div class="inventory-data"><strong>armor:</strong> {armor[:100]}{'...' if len(armor)>100 else ''}</div>
-                      <div class="inventory-data"><strong>talisman_bag:</strong> {talisman_bag[:100]}{'...' if len(talisman_bag)>100 else ''}</div>
-                      <div class="inventory-data"><strong>quiver:</strong> {quiver[:100]}{'...' if len(quiver)>100 else ''}</div>
-                      <div class="inventory-data"><strong>wardrobe:</strong> {wardrobe[:100]}{'...' if len(wardrobe)>100 else ''}</div>
+                      <div class="inventory-data"><strong>inv_contents:</strong> {trunc(inv_contents)}</div>
+                      <div class="inventory-data"><strong>ender_chest:</strong> {trunc(ender_chest)}</div>
+                      <div class="inventory-data"><strong>armor:</strong> {trunc(armor)}</div>
+                      <div class="inventory-data"><strong>talisman_bag:</strong> {trunc(talisman_bag)}</div>
+                      <div class="inventory-data"><strong>quiver:</strong> {trunc(quiver)}</div>
+                      <div class="inventory-data"><strong>wardrobe:</strong> {trunc(wardrobe)}</div>
+                      <div class="inventory-data"><strong>sacks_bag:</strong> {trunc(sacks)}</div>
+                      <div class="inventory-data"><strong>potion_bag:</strong> {trunc(potion_bag)}</div>
+                      <div class="inventory-data"><strong>fishing_bag:</strong> {trunc(fishing_bag)}</div>
+                      <div class="inventory-data"><strong>personal_vault:</strong> {trunc(personal_vault)}</div>
                       <div class="badge" style="margin-top:0.5rem;">🔐 Data is Base64‑encoded NBT. Use external tools to decode.</div>
                   </div>
               </div>
-              <footer>Generated from Hypixel API (v2) · Data as of {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</footer>
+              <footer>Generated from Hypixel API (v2) · Data as of {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</footer>
           </div>
           </body>
-          </html>
-          '''
+          </html>''')
 
+          # Write final HTML
           with open('skyblock_report.html', 'w') as f:
-              f.write(html)
+              f.write('\n'.join(html_lines))
+
           print("✅ HTML report generated: skyblock_report.html")
-          EOF
+          PYTHON_SCRIPT
 
       - name: Upload HTML report
         uses: actions/upload-artifact@v4
         with:
-          name: skyblock-report-${{ github.event.inputs.player_name }}
+          name: skyblock-report-${{ github.event.inputs.player_input }}
           path: skyblock_report.html
           retention-days: 7
           if-no-files-found: error
@@ -385,7 +438,7 @@ jobs:
       - name: Upload raw JSON (optional)
         uses: actions/upload-artifact@v4
         with:
-          name: raw-json-files
+          name: raw-json-files-${{ github.event.inputs.player_input }}
           path: |
             skyblock_profiles.json
             player_data.json
