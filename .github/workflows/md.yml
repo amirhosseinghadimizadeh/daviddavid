@@ -1,9 +1,9 @@
-name: Download Any Torrent from Magnet
+name: Download from Magnet Link
 
 on:
   workflow_dispatch:
     inputs:
-      magnet_link:
+      magnet:
         description: 'Paste your magnet link here'
         required: true
         type: string
@@ -11,19 +11,63 @@ on:
 jobs:
   download:
     runs-on: ubuntu-latest
+    timeout-minutes: 60   # Prevents hanging for large files
     steps:
       - name: Install aria2
-        run: sudo apt-get update && sudo apt-get install -y aria2
-
-      - name: Download torrent
         run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2
+          aria2c --version   # Verify installation
+
+      - name: Sanitize magnet link and download
+        env:
+          MAGNET: ${{ github.event.inputs.magnet }}
+        run: |
+          # Create download directory
           mkdir -p download
           cd download
-          aria2c --seed-time=0 --follow-torrent=mem "${{ github.event.inputs.magnet_link }}"
+          
+          # Use a subshell to prevent injection; pass magnet via environment variable
+          # The quotes are critical to preserve special characters like '&', '?', '='
+          aria2c --seed-time=0 \
+                 --follow-torrent=mem \
+                 --max-connection-per-server=16 \
+                 --split=16 \
+                 --timeout=60 \
+                 --retry-wait=5 \
+                 --max-tries=10 \
+                 --bt-tracker-timeout=120 \
+                 "$MAGNET"
 
-      - name: Upload artifact
+      - name: Verify and list downloaded files
+        id: verify
+        run: |
+          cd download
+          if [ -z "$(ls -A)" ]; then
+            echo "::error::Download directory is empty. The magnet link may be invalid or no peers available."
+            exit 1
+          fi
+          echo "Downloaded files:"
+          ls -la
+          # Count number of files
+          COUNT=$(find . -type f | wc -l)
+          echo "file_count=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact (only if files exist)
+        if: steps.verify.outputs.file_count != '0'
         uses: actions/upload-artifact@v4
         with:
-          name: torrent-download
+          name: torrent-download-${{ github.run_id }}
           path: download/
           retention-days: 1
+          if-no-files-found: error
+
+      - name: Clean exit on success
+        if: success() && steps.verify.outputs.file_count != '0'
+        run: echo "Download completed successfully. Artifact will be available shortly."
+
+      - name: Failure notification
+        if: failure()
+        run: |
+          echo "::error::Download failed. Check that your magnet link is valid and that the torrent has seeders."
+          exit 1
