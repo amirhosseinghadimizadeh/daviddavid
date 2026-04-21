@@ -1,4 +1,4 @@
-name: 📦 Telegram Channel Mirror (Exact Web Replica)
+name: 📦 Telegram Channel Mirror (Static Telegram Web Style)
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
           sudo apt-get install -y zip
           pip install requests beautifulsoup4
 
-      - name: Mirror Telegram channel (exact HTML)
+      - name: Scrape channel and build static Telegram‑style HTML
         env:
           CHANNELS: ${{ github.event.inputs.channels }}
           LIMIT: ${{ github.event.inputs.limit }}
@@ -59,6 +59,132 @@ jobs:
                   print(f"      DL error: {e}")
               return False
 
+          # Telegram Web exact style (dark theme, static)
+          TELEGRAM_CSS = """
+          :root {
+              --tg-bg: #0a0a0a;
+              --tg-secondary-bg: #1f1f1f;
+              --tg-text: #ffffff;
+              --tg-hint: #aaaaaa;
+              --tg-link: #6ab3f3;
+              --tg-accent: #2b5278;
+              --tg-border: rgba(255,255,255,0.1);
+          }
+          * { margin:0; padding:0; box-sizing:border-box; }
+          body {
+              background: var(--tg-bg);
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+              color: var(--tg-text);
+              line-height: 1.4;
+          }
+          .container {
+              max-width: 800px;
+              margin: 0 auto;
+              padding: 0 12px;
+          }
+          /* Channel header */
+          .channel-header {
+              display: flex;
+              align-items: center;
+              gap: 16px;
+              padding: 20px 0;
+              border-bottom: 1px solid var(--tg-border);
+              margin-bottom: 16px;
+          }
+          .avatar {
+              width: 56px;
+              height: 56px;
+              border-radius: 50%;
+              object-fit: cover;
+              background: var(--tg-accent);
+          }
+          .avatar-placeholder {
+              width: 56px;
+              height: 56px;
+              border-radius: 50%;
+              background: var(--tg-accent);
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              font-size: 32px;
+          }
+          .channel-info h1 {
+              font-size: 1.3rem;
+              font-weight: 500;
+          }
+          .channel-info .username {
+              color: var(--tg-hint);
+              font-size: 0.85rem;
+          }
+          .channel-info .about {
+              margin-top: 4px;
+              font-size: 0.85rem;
+              color: var(--tg-hint);
+          }
+          /* Date separator */
+          .date-separator {
+              text-align: center;
+              font-size: 0.7rem;
+              color: var(--tg-hint);
+              margin: 16px 0 12px;
+              position: relative;
+          }
+          /* Message bubble */
+          .message {
+              display: flex;
+              margin-bottom: 16px;
+          }
+          .bubble {
+              background: var(--tg-secondary-bg);
+              border-radius: 18px;
+              padding: 8px 12px;
+              max-width: 85%;
+              word-wrap: break-word;
+          }
+          .message-text {
+              font-size: 0.95rem;
+              margin-bottom: 6px;
+          }
+          .message-text a {
+              color: var(--tg-link);
+              text-decoration: none;
+          }
+          .message-time {
+              font-size: 0.65rem;
+              color: var(--tg-hint);
+              margin-top: 4px;
+          }
+          /* Media */
+          .media-container {
+              margin-top: 8px;
+          }
+          .media-img, .media-video {
+              max-width: 100%;
+              max-height: 300px;
+              border-radius: 12px;
+              display: block;
+          }
+          .download-link {
+              display: inline-block;
+              margin-top: 6px;
+              font-size: 12px;
+              color: var(--tg-link);
+              text-decoration: none;
+              background: rgba(0,0,0,0.3);
+              padding: 4px 8px;
+              border-radius: 8px;
+          }
+          .download-link:hover { text-decoration: underline; }
+          footer {
+              text-align: center;
+              font-size: 0.7rem;
+              color: var(--tg-hint);
+              padding: 20px;
+              border-top: 1px solid var(--tg-border);
+              margin-top: 20px;
+          }
+          """
+
           for channel in channels:
               print(f"\n📡 Processing @{channel}")
               safe = re.sub(r'[^a-zA-Z0-9_]', '_', channel)
@@ -67,64 +193,39 @@ jobs:
               ch_dir.mkdir(exist_ok=True)
               media_dir.mkdir(exist_ok=True)
 
-              # Fetch the first page to get channel info and the base HTML structure
               url = f"https://t.me/s/{channel}"
+              before = None
+              posts = []   # list of dicts with 'date', 'text', 'media_html'
+              fetched = 0
+              channel_name = channel
+              channel_about = ""
+              avatar_local = None
+
+              # Fetch first page to get channel metadata and avatar
               try:
                   resp = requests.get(url, headers=headers, timeout=30)
                   resp.raise_for_status()
-              except Exception as e:
-                  print(f"  ❌ Failed to fetch channel: {e}")
+              except:
+                  print(f"  ❌ Failed to fetch channel")
                   continue
-
               soup = BeautifulSoup(resp.text, 'html.parser')
-
-              # Extract channel metadata
-              channel_name = soup.select_one('.tgme_channel_info_header_title')
-              channel_name = channel_name.get_text(strip=True) if channel_name else channel
-              channel_about = soup.select_one('.tgme_channel_info_description')
-              channel_about = channel_about.get_text(strip=True) if channel_about else ""
-              # Channel photo (avatar)
-              photo_elem = soup.select_one('.tgme_page_photo_image')
-              avatar_url = None
-              if photo_elem:
-                  style = photo_elem.get('style', '')
+              name_elem = soup.select_one('.tgme_channel_info_header_title')
+              if name_elem:
+                  channel_name = name_elem.get_text(strip=True)
+              about_elem = soup.select_one('.tgme_channel_info_description')
+              if about_elem:
+                  channel_about = about_elem.get_text(strip=True)
+              # Avatar
+              avatar_elem = soup.select_one('.tgme_page_photo_image')
+              if avatar_elem:
+                  style = avatar_elem.get('style', '')
                   m = re.search(r'url\(["\']?(.+?)["\']?\)', style)
                   if m:
                       avatar_url = m.group(1)
-                      download_file(avatar_url, ch_dir / "avatar.jpg")
-                      avatar_url = "avatar.jpg"
+                      avatar_local = "avatar.jpg"
+                      download_file(avatar_url, ch_dir / avatar_local)
 
-              # Get the CSS from the live page (it's linked)
-              # We'll fetch the CSS file(s) to embed
-              css_links = []
-              for link in soup.find_all('link', rel='stylesheet'):
-                  href = link.get('href')
-                  if href and href.startswith('/'):
-                      href = 'https://t.me' + href
-                  elif href and not href.startswith('http'):
-                      href = 'https://t.me' + href
-                  if href:
-                      css_links.append(href)
-              # Download and combine CSS
-              all_css = ""
-              for css_url in css_links[:3]:  # first few are enough
-                  try:
-                      r = requests.get(css_url, headers=headers, timeout=15)
-                      if r.status_code == 200:
-                          all_css += r.text + "\n"
-                  except:
-                      pass
-
-              # Now we need to paginate to get up to max_posts messages.
-              # We'll collect messages from multiple pages, download media, and modify the HTML.
-              # Instead of building HTML from scratch, we will clone the original page's message elements
-              # and replace them with our own, keeping the exact same classes.
-
-              # We'll store messages as HTML strings (the outer .tgme_widget_message_wrap)
-              all_messages_html = []
-              before = None
-              fetched = 0
-
+              # Paginate to get up to max_posts
               while fetched < max_posts:
                   page_url = url if not before else f"{url}?before={before}"
                   try:
@@ -133,83 +234,103 @@ jobs:
                   except:
                       break
                   page_soup = BeautifulSoup(page_resp.text, 'html.parser')
-                  message_wraps = page_soup.select('.tgme_widget_message_wrap')
-                  if not message_wraps:
+                  msgs = page_soup.select('.tgme_widget_message_wrap')
+                  if not msgs:
                       break
-                  for wrap in message_wraps:
+                  for msg_wrap in msgs:
                       if fetched >= max_posts:
                           break
-                      # Clone the wrap HTML
-                      wrap_html = str(wrap)
-                      # Download media inside this wrap and replace URLs with local paths
-                      # Parse again with BeautifulSoup to find media elements
-                      temp_soup = BeautifulSoup(wrap_html, 'html.parser')
-                      # Process photos (background-image style)
-                      for photo in temp_soup.select('.tgme_widget_message_photo_wrap'):
+                      msg = msg_wrap.select_one('.tgme_widget_message')
+                      if not msg:
+                          continue
+                      # Date
+                      date_link = msg.select_one('.tgme_widget_message_date')
+                      date_elem = date_link.select_one('time') if date_link else None
+                      date_str = "Unknown date"
+                      if date_elem and date_elem.get('datetime'):
+                          try:
+                              dt = datetime.fromisoformat(date_elem['datetime'].replace('Z', '+00:00'))
+                              date_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+                          except:
+                              date_str = date_elem.get_text(strip=True)
+                      # Text
+                      text_elem = msg.select_one('.tgme_widget_message_text')
+                      text = text_elem.get_text(strip=True) if text_elem else ""
+                      text = re.sub(r'(https?://[^\s]+)', r'<a href="\1" target="_blank">\1</a>', text)
+                      text = text or "<i>No text</i>"
+
+                      # Media handling
+                      media_html = ""
+                      # Photo
+                      photo = msg.select_one('.tgme_widget_message_photo_wrap')
+                      if photo:
                           style = photo.get('style', '')
                           m = re.search(r'url\(["\']?(.+?)["\']?\)', style)
                           if m:
                               img_url = m.group(1)
-                              fname = f"{fetched}_{len(all_messages_html)}.jpg"
-                              filepath = media_dir / fname
+                              fname = f"{fetched}_{len(posts)}.jpg"
+                              path = media_dir / fname
                               print(f"    📸 Downloading {fname}")
-                              if download_file(img_url, filepath):
-                                  # Replace style background-image with local file
-                                  new_style = re.sub(r'url\(["\']?[^\)]+["\']?\)', f'url("media/{fname}")', style)
-                                  photo['style'] = new_style
-                                  # Also add a download link below the photo
-                                  download_link = temp_soup.new_tag('a')
-                                  download_link['href'] = f"media/{fname}"
-                                  download_link['download'] = fname
-                                  download_link['class'] = 'download-link'
-                                  download_link.string = '📥 Download'
-                                  # Insert after the photo wrap
-                                  photo.insert_after(download_link)
-                      # Process videos
-                      for video in temp_soup.select('.tgme_widget_message_video video'):
-                          src = video.get('src')
-                          if src:
-                              if src.startswith('/'):
-                                  src = 'https://t.me' + src
-                              fname = f"{fetched}_{len(all_messages_html)}.mp4"
-                              filepath = media_dir / fname
-                              print(f"    🎬 Downloading {fname}")
-                              if download_file(src, filepath):
-                                  video['src'] = f"media/{fname}"
-                                  # Add download link after video container
-                                  parent = video.find_parent('.tgme_widget_message_video')
-                                  if parent:
-                                      download_link = temp_soup.new_tag('a')
-                                      download_link['href'] = f"media/{fname}"
-                                      download_link['download'] = fname
-                                      download_link['class'] = 'download-link'
-                                      download_link.string = '📥 Download'
-                                      parent.insert_after(download_link)
-                      # Process document media (images/videos)
-                      for doc in temp_soup.select('.tgme_widget_message_document'):
+                              if download_file(img_url, path):
+                                  media_html = f'''
+                                  <div class="media-container">
+                                      <img src="media/{fname}" class="media-img" loading="lazy">
+                                      <a href="media/{fname}" download="{fname}" class="download-link">📥 Download</a>
+                                  </div>'''
+                      # Video
+                      video = msg.select_one('.tgme_widget_message_video video')
+                      if video and video.get('src'):
+                          vid_url = video['src']
+                          if vid_url.startswith('/'):
+                              vid_url = 'https://t.me' + vid_url
+                          fname = f"{fetched}_{len(posts)}.mp4"
+                          path = media_dir / fname
+                          print(f"    🎬 Downloading {fname}")
+                          if download_file(vid_url, path):
+                              media_html = f'''
+                              <div class="media-container">
+                                  <video controls src="media/{fname}" class="media-video"></video>
+                                  <a href="media/{fname}" download="{fname}" class="download-link">📥 Download</a>
+                              </div>'''
+                      # Document (video/image)
+                      doc = msg.select_one('.tgme_widget_message_document')
+                      if doc and not media_html:
                           link = doc.select_one('a.tgme_widget_message_document')
                           if link and link.get('href'):
                               file_url = link['href']
                               if file_url.startswith('/'):
                                   file_url = 'https://t.me' + file_url
-                              # Determine extension from URL or content-type (simplify to .mp4 for videos)
-                              fname = f"{fetched}_{len(all_messages_html)}_doc.mp4"
-                              filepath = media_dir / fname
+                              fname = f"{fetched}_{len(posts)}_doc.mp4"
+                              path = media_dir / fname
                               print(f"    📄 Downloading document {fname}")
-                              if download_file(file_url, filepath):
-                                  # Replace the entire document preview with a video player + download link
-                                  new_video = temp_soup.new_tag('video', controls=True, src=f"media/{fname}", **{'class': 'media-video'})
-                                  new_video['style'] = 'max-width:100%; border-radius:12px;'
-                                  doc.clear()
-                                  doc.append(new_video)
-                                  download_link = temp_soup.new_tag('a')
-                                  download_link['href'] = f"media/{fname}"
-                                  download_link['download'] = fname
-                                  download_link['class'] = 'download-link'
-                                  download_link.string = '📥 Download'
-                                  doc.append(download_link)
-                      # Re-serialize the modified wrap
-                      all_messages_html.append(str(temp_soup))
+                              if download_file(file_url, path):
+                                  media_html = f'''
+                                  <div class="media-container">
+                                      <video controls src="media/{fname}" class="media-video"></video>
+                                      <a href="media/{fname}" download="{fname}" class="download-link">📥 Download</a>
+                                  </div>'''
+                          else:
+                              thumb = doc.select_one('.tgme_widget_message_document_thumb')
+                              if thumb:
+                                  style = thumb.get('style', '')
+                                  m = re.search(r'url\(["\']?(.+?)["\']?\)', style)
+                                  if m:
+                                      img_url = m.group(1)
+                                      fname = f"{fetched}_{len(posts)}_doc.jpg"
+                                      path = media_dir / fname
+                                      print(f"    📸 Downloading doc thumbnail {fname}")
+                                      if download_file(img_url, path):
+                                          media_html = f'''
+                                          <div class="media-container">
+                                              <img src="media/{fname}" class="media-img" loading="lazy">
+                                              <a href="media/{fname}" download="{fname}" class="download-link">📥 Download</a>
+                                          </div>'''
+
+                      posts.append({
+                          'date': date_str,
+                          'text': text,
+                          'media_html': media_html
+                      })
                       fetched += 1
                   # Pagination
                   next_link = page_soup.select_one('a.tgme_widget_message_date[data-before]')
@@ -218,48 +339,59 @@ jobs:
                   before = next_link['data-before']
                   time.sleep(1)
 
-              # Now build the final HTML by cloning the original page's outer structure
-              # and replacing the messages container with our collected messages.
-              # We'll take the original soup, remove all message wraps, then append ours.
-              original_html = resp.text
-              # Use BeautifulSoup to manipulate
-              final_soup = BeautifulSoup(original_html, 'html.parser')
-              # Remove all existing message wraps
-              for wrap in final_soup.select('.tgme_widget_message_wrap'):
-                  wrap.decompose()
-              # Find the container that holds messages (usually a <div class="tgme_channel_history"> or similar)
-              history_div = final_soup.select_one('.tgme_channel_history')
-              if not history_div:
-                  history_div = final_soup.find('div', class_=re.compile('history'))
-              if not history_div:
-                  # Fallback: just append to body
-                  history_div = final_soup.body
-              # Insert our collected messages
-              for msg_html in all_messages_html:
-                  msg_soup = BeautifulSoup(msg_html, 'html.parser')
-                  history_div.append(msg_soup)
-              # Also add some CSS for download links if not present
-              style_tag = final_soup.new_tag('style')
-              style_tag.string = '''
-              .download-link {
-                  display: inline-block;
-                  margin-top: 8px;
-                  font-size: 12px;
-                  color: #6ab3f3;
-                  text-decoration: none;
-                  background: rgba(0,0,0,0.3);
-                  padding: 4px 8px;
-                  border-radius: 8px;
-              }
-              .download-link:hover { text-decoration: underline; }
-              .media-video { max-width: 100%; border-radius: 12px; }
-              '''
-              final_soup.head.append(style_tag)
+              if not posts:
+                  print(f"  ⚠️ No posts found")
+                  posts = [{'date': 'N/A', 'text': 'No posts could be fetched.', 'media_html': ''}]
 
-              # Save the final HTML
+              # Build the final HTML
+              avatar_html = f'<img src="{avatar_local}" class="avatar" alt="avatar">' if avatar_local else '<div class="avatar-placeholder">📢</div>'
+              html = f'''<!DOCTYPE html>
+              <html lang="en">
+              <head>
+                  <meta charset="UTF-8">
+                  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+                  <title>@{channel} – Telegram Archive</title>
+                  <style>{TELEGRAM_CSS}</style>
+              </head>
+              <body>
+              <div class="container">
+                  <div class="channel-header">
+                      {avatar_html}
+                      <div class="channel-info">
+                          <h1>{channel_name}</h1>
+                          <div class="username">@{channel}</div>
+                          <div class="about">{channel_about}</div>
+                      </div>
+                  </div>
+              '''
+              last_date = None
+              for p in posts:
+                  # Date separator if day changes
+                  current_day = p['date'].split(' ')[0] if ' ' in p['date'] else p['date']
+                  if current_day != last_date:
+                      html += f'<div class="date-separator">{current_day}</div>'
+                      last_date = current_day
+                  html += f'''
+                  <div class="message">
+                      <div class="bubble">
+                          <div class="message-text">{p['text']}</div>
+                          {p['media_html']}
+                          <div class="message-time">{p['date'].split(' ')[1] if ' ' in p['date'] else p['date']}</div>
+                      </div>
+                  </div>
+                  '''
+              html += f'''
+                  <footer>
+                      Archived offline from Telegram on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br>
+                      Media files are stored locally. Click "Download" to save any file.
+                  </footer>
+              </div>
+              </body>
+              </html>
+              '''
               with open(ch_dir / "index.html", "w", encoding="utf-8") as f:
-                  f.write(str(final_soup))
-              print(f"  ✅ Saved {len(all_messages_html)} posts, {len(list(media_dir.glob('*')))} media files")
+                  f.write(html)
+              print(f"  ✅ Saved {len(posts)} posts, {len(list(media_dir.glob('*')))} media files")
 
           # Create ZIP
           zip_path = Path("telegram_offline_report.zip")
