@@ -3,8 +3,8 @@ name: SkyBlock Player Lookup
 on:
   workflow_dispatch:
     inputs:
-      player_name:
-        description: 'Minecraft player username'
+      player_input:
+        description: 'Minecraft username OR UUID (32 chars, no dashes)'
         required: true
         type: string
 
@@ -12,60 +12,71 @@ jobs:
   lookup-player:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # Get UUID from Mojang
-      - name: Get UUID from Mojang API
-        id: uuid
+      - name: Parse input (username or UUID)
+        id: parse
         run: |
-          USERNAME="${{ github.event.inputs.player_name }}"
-          RESPONSE=$(curl --max-time 10 -s "https://api.mojang.com/users/profiles/minecraft/$USERNAME")
-          UUID=$(echo "$RESPONSE" | jq -r '.id')
-          if [ "$UUID" = "null" ] || [ -z "$UUID" ]; then
-            echo "Invalid username"
-            exit 1
+          INPUT="${{ github.event.inputs.player_input }}"
+          # Check if input is a 32-character hex string (UUID without dashes)
+          if [[ "$INPUT" =~ ^[a-f0-9]{32}$ ]]; then
+            echo "Input is a valid UUID"
+            echo "uuid=$INPUT" >> $GITHUB_OUTPUT
+            echo "username=unknown" >> $GITHUB_OUTPUT
+          else
+            # Assume it's a username, convert via Mojang API
+            echo "Input is a username, converting to UUID..."
+            RESPONSE=$(curl --max-time 10 -s "https://api.mojang.com/users/profiles/minecraft/$INPUT")
+            UUID=$(echo "$RESPONSE" | jq -r '.id')
+            if [ "$UUID" = "null" ] || [ -z "$UUID" ]; then
+              echo "Invalid username: $INPUT"
+              exit 1
+            fi
+            echo "uuid=$UUID" >> $GITHUB_OUTPUT
+            echo "username=$INPUT" >> $GITHUB_OUTPUT
           fi
-          echo "uuid=$UUID" >> $GITHUB_OUTPUT
 
-      # Fetch Hypixel player data
       - name: Fetch Hypixel player data
         id: hypixel
         env:
           HYPIXEL_API_KEY: ${{ secrets.HYPIXEL_API_KEY }}
         run: |
-          UUID="${{ steps.uuid.outputs.uuid }}"
+          UUID="${{ steps.parse.outputs.uuid }}"
+          echo "Fetching data for UUID: $UUID"
           HTTP_CODE=$(curl -s -o player.json -w "%{http_code}" -H "API-Key: $HYPIXEL_API_KEY" "https://api.hypixel.net/player?uuid=$UUID")
+          echo "HTTP response code: $HTTP_CODE"
           if [ "$HTTP_CODE" = "404" ]; then
             echo "player_exists=false" >> $GITHUB_OUTPUT
-            echo "reason=Player never logged into Hypixel" >> $GITHUB_OUTPUT
+            echo "reason=Player never logged into Hypixel (HTTP 404)" >> $GITHUB_OUTPUT
             exit 0
           fi
           if [ "$HTTP_CODE" != "200" ]; then
             echo "HTTP error $HTTP_CODE"
+            cat player.json 2>/dev/null || echo "No body"
             exit 1
           fi
           SUCCESS=$(jq -r '.success' player.json)
           if [ "$SUCCESS" != "true" ]; then
-            echo "API failure"
+            echo "API returned success=false"
             exit 1
           fi
           PLAYER_EXISTS=$(jq -r '.player != null' player.json)
           if [ "$PLAYER_EXISTS" != "true" ]; then
             echo "player_exists=false" >> $GITHUB_OUTPUT
-            echo "reason=Player has no Hypixel data" >> $GITHUB_OUTPUT
+            echo "reason=Player has no Hypixel data (null player field)" >> $GITHUB_OUTPUT
             exit 0
           fi
           echo "player_exists=true" >> $GITHUB_OUTPUT
+          echo "✅ Player found"
 
-      # Fetch SkyBlock profiles (if player exists)
-      - name: Fetch SkyBlock profiles
+      - name: Fetch SkyBlock profiles (if player exists)
         id: skyblock
         if: steps.hypixel.outputs.player_exists == 'true'
         env:
           HYPIXEL_API_KEY: ${{ secrets.HYPIXEL_API_KEY }}
         run: |
-          UUID="${{ steps.uuid.outputs.uuid }}"
+          UUID="${{ steps.parse.outputs.uuid }}"
           HTTP_CODE=$(curl -s -o profiles.json -w "%{http_code}" -H "API-Key: $HYPIXEL_API_KEY" "https://api.hypixel.net/skyblock/profiles?uuid=$UUID")
           if [ "$HTTP_CODE" != "200" ]; then
             echo "has_profiles=false" >> $GITHUB_OUTPUT
@@ -83,104 +94,116 @@ jobs:
             echo "has_profiles=false" >> $GITHUB_OUTPUT
           fi
 
-      # Generate summary (using printf to avoid here-document issues)
       - name: Generate summary
         run: |
-          PLAYER_NAME="${{ github.event.inputs.player_name }}"
-          UUID="${{ steps.uuid.outputs.uuid }}"
+          UUID="${{ steps.parse.outputs.uuid }}"
+          PLAYER_NAME="${{ steps.parse.outputs.username }}"
+          if [ -z "$PLAYER_NAME" ] || [ "$PLAYER_NAME" = "unknown" ]; then
+            DISPLAY_NAME="UUID: $UUID"
+          else
+            DISPLAY_NAME="$PLAYER_NAME (UUID: $UUID)"
+          fi
           PLAYER_EXISTS="${{ steps.hypixel.outputs.player_exists }}"
-          SUMMARY_FILE="summary.md"
+          SUMMARY="summary.md"
           
           if [ "$PLAYER_EXISTS" != "true" ]; then
             REASON="${{ steps.hypixel.outputs.reason }}"
-            printf "## SkyBlock Player Lookup Results\n\n" > $SUMMARY_FILE
-            printf "**Player:** %s\n\n" "$PLAYER_NAME" >> $SUMMARY_FILE
-            printf "**UUID:** \`%s\`\n\n" "$UUID" >> $SUMMARY_FILE
-            printf "❌ **%s**\n\n" "$REASON" >> $SUMMARY_FILE
-            printf "No data available.\n" >> $SUMMARY_FILE
+            {
+              echo "## SkyBlock Player Lookup Results"
+              echo ""
+              echo "**Input:** ${{ github.event.inputs.player_input }}"
+              echo "**Resolved UUID:** \`$UUID\`"
+              echo ""
+              echo "❌ **$REASON**"
+              echo ""
+              echo "Possible reasons:"
+              echo "- The player has never joined Hypixel"
+              echo "- The UUID is incorrect"
+              echo "- The Hypixel API key is invalid or expired"
+            } > $SUMMARY
           else
-            # Hypixel general data
-            FIRST_LOGIN_MS=$(jq -r '.player.firstLogin // 0' player.json)
-            LAST_LOGIN_MS=$(jq -r '.player.lastLogin // 0' player.json)
-            if [ "$FIRST_LOGIN_MS" != "0" ] && [ "$FIRST_LOGIN_MS" != "null" ]; then
-              FIRST_ONLINE=$(date -d "@$((FIRST_LOGIN_MS / 1000))" +"%Y-%m-%d %H:%M:%S UTC")
+            # General data
+            FIRST_MS=$(jq -r '.player.firstLogin // 0' player.json)
+            LAST_MS=$(jq -r '.player.lastLogin // 0' player.json)
+            if [ "$FIRST_MS" != "0" ] && [ "$FIRST_MS" != "null" ]; then
+              FIRST_ONLINE=$(date -d "@$((FIRST_MS / 1000))" +"%Y-%m-%d %H:%M:%S UTC")
             else
               FIRST_ONLINE="Unknown"
             fi
-            if [ "$LAST_LOGIN_MS" != "0" ] && [ "$LAST_LOGIN_MS" != "null" ]; then
-              LAST_ONLINE=$(date -d "@$((LAST_LOGIN_MS / 1000))" +"%Y-%m-%d %H:%M:%S UTC")
+            if [ "$LAST_MS" != "0" ] && [ "$LAST_MS" != "null" ]; then
+              LAST_ONLINE=$(date -d "@$((LAST_MS / 1000))" +"%Y-%m-%d %H:%M:%S UTC")
             else
               LAST_ONLINE="Unknown"
             fi
             
-            # SkyBlock details
             HAS_PROFILES="${{ steps.skyblock.outputs.has_profiles }}"
             if [ "$HAS_PROFILES" = "true" ]; then
               LATEST_PROFILE=$(jq --arg UUID "$UUID" '.profiles | map(select(.members[$UUID] != null)) | sort_by(.members[$UUID].last_save // 0 | tonumber) | reverse | .[0]' profiles.json)
               PROFILE_NAME=$(echo "$LATEST_PROFILE" | jq -r '.cute_name // "Unknown"')
               MEMBER=$(echo "$LATEST_PROFILE" | jq --arg UUID "$UUID" -r '.members[$UUID] // empty')
               LEVEL=$(echo "$MEMBER" | jq -r '.leveling.level // 0')
-              RAW_LOCATION=$(echo "$MEMBER" | jq -r '.location // "Unknown"')
-              case "$RAW_LOCATION" in
-                "hub") LAST_LOCATION="Hub (SkyBlock Hub)" ;;
-                "dynamic") LAST_LOCATION="Private Island / Garden" ;;
-                "combat_1") LAST_LOCATION="Dungeon Hub" ;;
-                "combat_2") LAST_LOCATION="The Catacombs" ;;
-                "combat_3") LAST_LOCATION="Crimson Isle" ;;
-                "mining_1") LAST_LOCATION="Gold Mine" ;;
-                "mining_2") LAST_LOCATION="Deep Caverns" ;;
-                "mining_3") LAST_LOCATION="Dwarven Mines" ;;
-                "mining_4") LAST_LOCATION="Crystal Hollows" ;;
-                "foraging_1") LAST_LOCATION="Park / Jungle" ;;
-                "farming_1") LAST_LOCATION="The Barn" ;;
-                "farming_2") LAST_LOCATION="Mushroom Desert" ;;
-                "fishing_1") LAST_LOCATION="Fishing Pond" ;;
-                "winter") LAST_LOCATION="Jerry's Workshop" ;;
-                "private") LAST_LOCATION="Private Island" ;;
-                "home") LAST_LOCATION="Private Island" ;;
-                *) LAST_LOCATION="$RAW_LOCATION" ;;
+              RAW_LOC=$(echo "$MEMBER" | jq -r '.location // "Unknown"')
+              case "$RAW_LOC" in
+                "hub") LAST_LOC="Hub (SkyBlock Hub)" ;;
+                "dynamic") LAST_LOC="Private Island / Garden" ;;
+                "combat_1") LAST_LOC="Dungeon Hub" ;;
+                "combat_2") LAST_LOC="The Catacombs" ;;
+                "combat_3") LAST_LOC="Crimson Isle" ;;
+                "mining_1") LAST_LOC="Gold Mine" ;;
+                "mining_2") LAST_LOC="Deep Caverns" ;;
+                "mining_3") LAST_LOC="Dwarven Mines" ;;
+                "mining_4") LAST_LOC="Crystal Hollows" ;;
+                "foraging_1") LAST_LOC="Park / Jungle" ;;
+                "farming_1") LAST_LOC="The Barn" ;;
+                "farming_2") LAST_LOC="Mushroom Desert" ;;
+                "fishing_1") LAST_LOC="Fishing Pond" ;;
+                "winter") LAST_LOC="Jerry's Workshop" ;;
+                "private") LAST_LOC="Private Island" ;;
+                "home") LAST_LOC="Private Island" ;;
+                *) LAST_LOC="$RAW_LOC" ;;
               esac
-              LAST_SAVE_MS=$(echo "$MEMBER" | jq -r '.last_save // 0')
-              if [ "$LAST_SAVE_MS" != "0" ] && [ "$LAST_SAVE_MS" != "null" ]; then
-                LAST_SAVE_TIME=$(date -d "@$((LAST_SAVE_MS / 1000))" +"%Y-%m-%d %H:%M:%S UTC")
+              SAVE_MS=$(echo "$MEMBER" | jq -r '.last_save // 0')
+              if [ "$SAVE_MS" != "0" ] && [ "$SAVE_MS" != "null" ]; then
+                LAST_SAVE=$(date -d "@$((SAVE_MS / 1000))" +"%Y-%m-%d %H:%M:%S UTC")
               else
-                LAST_SAVE_TIME="Unknown"
+                LAST_SAVE="Unknown"
               fi
             else
               PROFILE_NAME="No SkyBlock profiles found"
               LEVEL="N/A"
-              LAST_LOCATION="N/A"
-              LAST_SAVE_TIME="N/A"
+              LAST_LOC="N/A"
+              LAST_SAVE="N/A"
             fi
             
-            printf "## SkyBlock Player Lookup Results\n\n" > $SUMMARY_FILE
-            printf "**Player:** %s\n\n" "$PLAYER_NAME" >> $SUMMARY_FILE
-            printf "**UUID:** \`%s\`\n\n" "$UUID" >> $SUMMARY_FILE
-            printf "### Hypixel Network\n" >> $SUMMARY_FILE
-            printf "- **First Login:** %s\n" "$FIRST_ONLINE" >> $SUMMARY_FILE
-            printf "- **Last Online:** %s\n\n" "$LAST_ONLINE" >> $SUMMARY_FILE
-            printf "### SkyBlock (Latest Profile: %s)\n" "$PROFILE_NAME" >> $SUMMARY_FILE
-            printf "- **SkyBlock Level:** %s\n" "$LEVEL" >> $SUMMARY_FILE
-            printf "- **Last Island:** %s\n" "$LAST_LOCATION" >> $SUMMARY_FILE
-            printf "- **Last Save Time:** %s\n" "$LAST_SAVE_TIME" >> $SUMMARY_FILE
+            {
+              echo "## SkyBlock Player Lookup Results"
+              echo ""
+              echo "**Player:** $DISPLAY_NAME"
+              echo ""
+              echo "### Hypixel Network"
+              echo "- **First Login:** $FIRST_ONLINE"
+              echo "- **Last Online:** $LAST_ONLINE"
+              echo ""
+              echo "### SkyBlock (Latest Profile: $PROFILE_NAME)"
+              echo "- **SkyBlock Level:** $LEVEL"
+              echo "- **Last Island:** $LAST_LOC"
+              echo "- **Last Save Time:** $LAST_SAVE"
+            } > $SUMMARY
           fi
 
-      # Display summary in log
       - name: Display summary
         run: cat summary.md
 
-      # Upload JSON artifacts
       - name: Upload JSON artifacts
         if: steps.hypixel.outputs.player_exists == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: skyblock-data-${{ github.event.inputs.player_name }}
+          name: skyblock-data
           path: |
             player.json
             profiles.json
           retention-days: 3
           if-no-files-found: ignore
 
-      # Add to GitHub step summary
       - name: Add to step summary
         run: cat summary.md >> $GITHUB_STEP_SUMMARY
