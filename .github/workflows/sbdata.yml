@@ -1,4 +1,4 @@
-name: SkyBlock Full Report with Tabs
+name: SkyBlock Full Report with GUI Inventory
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Parse input (username or UUID)
+      - name: Parse input
         id: parse
         run: |
           INPUT="${{ github.event.inputs.player_input }}"
@@ -49,19 +49,20 @@ jobs:
             -H "API-Key: $HYPIXEL_API_KEY" \
             "https://api.hypixel.net/v2/player?key=$HYPIXEL_API_KEY&uuid=$UUID"
 
-      - name: Generate HTML Report with Tabs
+      - name: Generate HTML Report with GUI Inventory
         run: |
           python3 << 'PYTHON_SCRIPT'
           import json
+          import base64
           from datetime import datetime, timezone
 
-          # ---------- Load data ----------
+          # Load data
           with open('skyblock_profiles.json') as f:
               profiles_data = json.load(f)
           with open('player_data.json') as f:
               player_data = json.load(f)
 
-          # ---------- Player info ----------
+          # Player info
           player = player_data.get('player', {})
           displayname = player.get('displayname', 'Unknown')
           uuid = player.get('uuid', '')
@@ -88,7 +89,7 @@ jobs:
           first_login_str = format_time(first_login)
           last_login_str = format_time(last_login)
 
-          # ---------- Selected profile ----------
+          # Selected profile
           profiles = profiles_data.get('profiles', [])
           selected_profile = None
           for p in profiles:
@@ -103,7 +104,7 @@ jobs:
               members = selected_profile.get('members', {})
               member_data = members.get(uuid, {})
 
-          # ---------- Safe number formatting ----------
+          # Helper functions
           def fmt(val):
               if isinstance(val, dict):
                   if 'current' in val:
@@ -120,47 +121,44 @@ jobs:
               except:
                   return str(val)
 
-          # ---------- Skills ----------
+          # Skills
           skills = member_data.get('experience', {})
-          skill_map = {
-              'SKILL_COMBAT': 'Combat',
-              'SKILL_TAMING': 'Taming',
-              'SKILL_ENCHANTING': 'Enchanting',
-              'SKILL_MINING': 'Mining',
-              'SKILL_FARMING': 'Farming',
-              'SKILL_ALCHEMY': 'Alchemy',
-              'SKILL_FORAGING': 'Foraging',
-              'SKILL_CARPENTRY': 'Carpentry',
-              'SKILL_FISHING': 'Fishing',
-              'SKILL_RUNECRAFTING': 'Runecrafting',
-              'SKILL_HUNTING': 'Hunting',
-              'SKILL_SOCIAL': 'Social'
+          skill_display = {
+              'SKILL_COMBAT': 'Combat', 'SKILL_TAMING': 'Taming',
+              'SKILL_ENCHANTING': 'Enchanting', 'SKILL_MINING': 'Mining',
+              'SKILL_FARMING': 'Farming', 'SKILL_ALCHEMY': 'Alchemy',
+              'SKILL_FORAGING': 'Foraging', 'SKILL_CARPENTRY': 'Carpentry',
+              'SKILL_FISHING': 'Fishing', 'SKILL_RUNECRAFTING': 'Runecrafting',
+              'SKILL_HUNTING': 'Hunting', 'SKILL_SOCIAL': 'Social'
           }
           skill_list = []
-          for sk, name in skill_map.items():
+          for sk, name in skill_display.items():
               xp = skills.get(sk, 0)
               if xp == 0:
                   continue
-              # approximate level
               if name in ['Combat', 'Enchanting', 'Mining']:
                   level = min(60, int((xp / 14e6) * 60)) if xp < 14e6 else 60
               else:
                   level = min(50, int((xp / 12e6) * 50)) if xp < 12e6 else 50
-              skill_list.append((name, xp, level))
+              percent = min(100, (xp / 111672500) * 100) if name not in ['Runecrafting', 'Hunting', 'Social'] else min(100, (xp / 20000000) * 100)
+              skill_list.append((name, xp, level, percent))
 
-          # ---------- Slayer ----------
+          # Slayer
           slayer = member_data.get('slayer', {}).get('slayer_bosses', {})
           slayer_list = []
           for boss, data in slayer.items():
+              xp = data.get('xp', 0)
+              percent = min(100, (xp / 10000000) * 100)
               slayer_list.append((
                   boss.capitalize(),
-                  data.get('xp', 0),
+                  xp,
                   data.get('boss_kills_tier_4', 0),
                   data.get('boss_kills_tier_5', 0),
-                  len(data.get('claimed_levels', {}))
+                  len(data.get('claimed_levels', {})),
+                  percent
               ))
 
-          # ---------- Currencies ----------
+          # Currencies
           coin_purse = member_data.get('currencies', {}).get('coin_purse', 0)
           bank_balance = member_data.get('banking', {}).get('balance', 0)
           motes = member_data.get('currencies', {}).get('motes_purse', 0)
@@ -173,40 +171,48 @@ jobs:
           if isinstance(gold_essence, dict):
               gold_essence = gold_essence.get('current', 0)
 
-          # ---------- Pets ----------
+          # Pets
           pets = member_data.get('pets_data', {}).get('pets', [])
-          top_pets = sorted(pets, key=lambda x: x.get('exp', 0), reverse=True)[:10]
+          top_pets = sorted(pets, key=lambda x: x.get('exp', 0), reverse=True)[:15]
 
-          # ---------- Collections ----------
+          # Collections
           collections = member_data.get('collection', {})
-          top_collections = sorted(collections.items(), key=lambda x: x[1], reverse=True)[:10]
+          all_collections = sorted(collections.items(), key=lambda x: x[1], reverse=True)[:30]
 
-          # ---------- Inventory (base64) ----------
+          # Inventory Base64 strings
           def get_bag_data(*keys):
               data = member_data
               for k in keys:
                   data = data.get(k, {})
               return data.get('data', '')
 
-          inv_contents = get_bag_data('inv_contents')
-          ender_chest = get_bag_data('ender_chest_contents')
-          armor = get_bag_data('inv_armor')
-          talisman_bag = get_bag_data('bag_contents', 'talisman_bag')
-          quiver = get_bag_data('bag_contents', 'quiver')
-          wardrobe = get_bag_data('wardrobe_contents')
-          sacks = get_bag_data('bag_contents', 'sacks_bag')
-          potion_bag = get_bag_data('bag_contents', 'potion_bag')
-          fishing_bag = get_bag_data('bag_contents', 'fishing_bag')
-          personal_vault = get_bag_data('personal_vault_contents')
+          inv_contents_b64 = get_bag_data('inv_contents')
+          ender_chest_b64 = get_bag_data('ender_chest_contents')
+          armor_b64 = get_bag_data('inv_armor')
+          talisman_bag_b64 = get_bag_data('bag_contents', 'talisman_bag')
+          quiver_b64 = get_bag_data('bag_contents', 'quiver')
+          wardrobe_b64 = get_bag_data('wardrobe_contents')
+          sacks_b64 = get_bag_data('bag_contents', 'sacks_bag')
+          potion_bag_b64 = get_bag_data('bag_contents', 'potion_bag')
+          fishing_bag_b64 = get_bag_data('bag_contents', 'fishing_bag')
+          personal_vault_b64 = get_bag_data('personal_vault_contents')
 
-          # ---------- Rift ----------
+          # Mining
+          mining_core = member_data.get('mining_core', {})
+          powder_mithril = mining_core.get('powder_mithril', 0)
+          powder_gemstone = mining_core.get('powder_gemstone', 0)
+          powder_glacite = mining_core.get('powder_glacite', 0)
+          crystals = mining_core.get('crystals', {})
+          crystal_list = [c.capitalize() for c, d in crystals.items() if d.get('state') == 'FOUND']
+
+          # Rift
           rift = member_data.get('rift', {})
           rift_motes = member_data.get('currencies', {}).get('motes_purse', 0)
           enigma_souls = len(rift.get('enigma', {}).get('found_souls', []))
           gallery_trophies = len(rift.get('gallery', {}).get('secured_trophies', []))
           rift_visits = rift.get('visits', 0)
 
-          # ---------- Dungeons ----------
+          # Dungeons
           dungeons = member_data.get('dungeons', {})
           catacombs = dungeons.get('dungeon_types', {}).get('catacombs', {})
           master_catacombs = dungeons.get('dungeon_types', {}).get('master_catacombs', {})
@@ -217,15 +223,18 @@ jobs:
           secrets = dungeons.get('secrets', 0)
           f7_completions = catacombs.get('tier_completions', {}).get('7', 0)
 
-          # ---------- Accessories ----------
+          # Accessories
           mp = member_data.get('accessory_bag_storage', {}).get('highest_magical_power', 0)
           selected_power = member_data.get('accessory_bag_storage', {}).get('selected_power', 'None')
           unlocked_powers = member_data.get('accessory_bag_storage', {}).get('unlocked_powers', [])
+          bag_upgrades = member_data.get('accessory_bag_storage', {}).get('bag_upgrades_purchased', 0)
 
-          # ---------- SkyBlock Level ----------
+          # SkyBlock Level
           sb_level = member_data.get('leveling', {}).get('experience', 0)
+          if sb_level == 0:
+              sb_level = sum([lvl for _, _, lvl, _ in skill_list]) * 2
 
-          # ---------- Build HTML with Tabs ----------
+          # Build HTML
           html_lines = []
           html_lines.append(f'''<!DOCTYPE html>
           <html lang="en">
@@ -233,6 +242,7 @@ jobs:
               <meta charset="UTF-8">
               <meta name="viewport" content="width=device-width, initial-scale=1.0">
               <title>SkyBlock Report · {displayname}</title>
+              <script src="https://cdn.jsdelivr.net/npm/prismarine-nbt@2.5.0/nbt.min.js"></script>
               <style>
                   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
                   body {{
@@ -242,7 +252,7 @@ jobs:
                       color: #e2e8f0;
                   }}
                   .container {{
-                      max-width: 1400px;
+                      max-width: 1600px;
                       margin: 0 auto;
                       background: #0f172ad9;
                       border-radius: 2rem;
@@ -300,7 +310,7 @@ jobs:
                   }}
                   .stat-grid {{
                       display: grid;
-                      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+                      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
                       gap: 1.2rem;
                   }}
                   .card {{
@@ -323,6 +333,18 @@ jobs:
                       border-bottom: 1px dashed #1e2a44;
                       font-size: 0.85rem;
                   }}
+                  .progress-bar {{
+                      background: #1e293b;
+                      border-radius: 12px;
+                      height: 8px;
+                      overflow: hidden;
+                      margin-top: 4px;
+                  }}
+                  .progress-fill {{
+                      background: linear-gradient(90deg, #facc15, #f59e0b);
+                      height: 100%;
+                      border-radius: 12px;
+                  }}
                   .badge {{
                       background: #facc1522;
                       color: #facc15;
@@ -330,15 +352,45 @@ jobs:
                       border-radius: 20px;
                       font-size: 0.7rem;
                   }}
-                  .inventory-data {{
-                      background: #0f172a;
+                  .inventory-grid {{
+                      display: grid;
+                      grid-template-columns: repeat(9, 1fr);
+                      gap: 4px;
+                      background: #1e293b;
                       padding: 0.8rem;
                       border-radius: 1rem;
-                      font-family: monospace;
+                      margin-bottom: 1rem;
+                  }}
+                  .inventory-slot {{
+                      background: #0f172a;
+                      border: 1px solid #334155;
+                      border-radius: 8px;
+                      aspect-ratio: 1;
+                      display: flex;
+                      flex-direction: column;
+                      align-items: center;
+                      justify-content: center;
+                      font-size: 0.7rem;
+                      text-align: center;
+                      padding: 4px;
+                      position: relative;
+                  }}
+                  .inventory-slot img {{
+                      width: 32px;
+                      height: 32px;
+                      image-rendering: pixelated;
+                  }}
+                  .item-count {{
+                      position: absolute;
+                      bottom: 2px;
+                      right: 4px;
                       font-size: 0.65rem;
-                      overflow-x: auto;
-                      white-space: pre-wrap;
-                      word-break: break-all;
+                      font-weight: bold;
+                      color: white;
+                      text-shadow: 1px 1px 0 #000;
+                  }}
+                  .slot-empty {{
+                      opacity: 0.4;
                   }}
                   footer {{
                       text-align: center;
@@ -361,6 +413,7 @@ jobs:
                   <button class="tab-btn" data-tab="skills">⚔️ Skills</button>
                   <button class="tab-btn" data-tab="slayer">🧪 Slayer</button>
                   <button class="tab-btn" data-tab="dungeons">🏰 Dungeons</button>
+                  <button class="tab-btn" data-tab="mining">⛏️ Mining</button>
                   <button class="tab-btn" data-tab="rift">🌀 Rift</button>
                   <button class="tab-btn" data-tab="pets">🐾 Pets</button>
                   <button class="tab-btn" data-tab="collections">📦 Collections</button>
@@ -372,7 +425,7 @@ jobs:
               <div id="general" class="tab-content active">
                   <div class="stat-grid">
                       <div class="card">
-                          <h3>📊 General</h3>
+                          <h3>📊 General Stats</h3>
                           <div class="stat-row"><span>Network Level</span><span>{int(network_exp/100000) if network_exp else 0}</span></div>
                           <div class="stat-row"><span>Achievement Points</span><span>{achievement_points}</span></div>
                           <div class="stat-row"><span>Karma</span><span>{fmt(karma)}</span></div>
@@ -386,34 +439,66 @@ jobs:
                           <div class="stat-row"><span>Bank</span><span>{fmt(bank_balance)}</span></div>
                           <div class="stat-row"><span>Motes</span><span>{fmt(motes)}</span></div>
                           <div class="stat-row"><span>Soulflow</span><span>{fmt(soulflow)}</span></div>
-                          <div class="stat-row"><span>Essence (Diamond/Gold)</span><span>{fmt(diamond_essence)} / {fmt(gold_essence)}</span></div>
+                          <div class="stat-row"><span>Diamond Essence</span><span>{fmt(diamond_essence)}</span></div>
+                          <div class="stat-row"><span>Gold Essence</span><span>{fmt(gold_essence)}</span></div>
                       </div>
                   </div>
               </div>
 
               <!-- Skills Tab -->
               <div id="skills" class="tab-content">
-                  <div class="card">
-                      <h3>⚔️ Skills</h3>''')
-          for name, xp, lvl in skill_list:
-              html_lines.append(f'<div class="stat-row"><span>{name}</span><span>Lvl {lvl} ({xp/1e6:.1f}M XP)</span></div>')
+                  <div class="card"><h3>⚔️ Skills</h3>''')
+          for name, xp, lvl, percent in skill_list:
+              html_lines.append(f'''
+                      <div class="skill-row">
+                          <div class="stat-row"><span>{name}</span><span>Lvl {lvl} ({xp/1e6:.1f}M XP)</span></div>
+                          <div class="progress-bar"><div class="progress-fill" style="width:{percent}%"></div></div>
+                      </div>''')
           html_lines.append('</div></div>')
 
           # Slayer Tab
           html_lines.append('<div id="slayer" class="tab-content"><div class="card"><h3>🧪 Slayer</h3>')
-          for boss, xp, t4, t5, lvl in slayer_list:
-              html_lines.append(f'<div class="stat-row"><span>{boss}</span><span>XP {xp/1000:.1f}k | Lvl {lvl} | T4/T5 kills {t4}/{t5}</span></div>')
+          for boss, xp, t4, t5, lvl, percent in slayer_list:
+              html_lines.append(f'''
+                      <div class="skill-row">
+                          <div class="stat-row"><span>{boss}</span><span>XP {xp/1000:.1f}k | Lvl {lvl} | T4/T5 kills {t4}/{t5}</span></div>
+                          <div class="progress-bar"><div class="progress-fill" style="width:{percent}%"></div></div>
+                      </div>''')
           html_lines.append('</div></div>')
 
           # Dungeons Tab
           html_lines.append(f'''
               <div id="dungeons" class="tab-content">
-                  <div class="card">
-                      <h3>🏰 Dungeons</h3>
-                      <div class="stat-row"><span>Catacombs Level</span><span>{cata_level}</span></div>
-                      <div class="stat-row"><span>Master Catacombs</span><span>{master_level}</span></div>
-                      <div class="stat-row"><span>Secrets Found</span><span>{fmt(secrets)}</span></div>
-                      <div class="stat-row"><span>F7 Completions</span><span>{fmt(f7_completions)}</span></div>
+                  <div class="stat-grid">
+                      <div class="card">
+                          <h3>🏰 Catacombs</h3>
+                          <div class="stat-row"><span>Level</span><span>{cata_level}</span></div>
+                          <div class="stat-row"><span>Experience</span><span>{fmt(cata_exp)}</span></div>
+                          <div class="stat-row"><span>F7 Completions</span><span>{fmt(f7_completions)}</span></div>
+                          <div class="stat-row"><span>Secrets Found</span><span>{fmt(secrets)}</span></div>
+                      </div>
+                      <div class="card">
+                          <h3>👑 Master Mode</h3>
+                          <div class="stat-row"><span>Level</span><span>{master_level}</span></div>
+                          <div class="stat-row"><span>Experience</span><span>{fmt(master_exp)}</span></div>
+                      </div>
+                  </div>
+              </div>''')
+
+          # Mining Tab
+          html_lines.append(f'''
+              <div id="mining" class="tab-content">
+                  <div class="stat-grid">
+                      <div class="card">
+                          <h3>⛏️ Powder</h3>
+                          <div class="stat-row"><span>Mithril Powder</span><span>{fmt(powder_mithril)}</span></div>
+                          <div class="stat-row"><span>Gemstone Powder</span><span>{fmt(powder_gemstone)}</span></div>
+                          <div class="stat-row"><span>Glacite Powder</span><span>{fmt(powder_glacite)}</span></div>
+                      </div>
+                      <div class="card">
+                          <h3>💎 Crystals Found</h3>
+                          <div class="stat-row"><span>{', '.join(crystal_list) if crystal_list else 'None'}</span></div>
+                      </div>
                   </div>
               </div>''')
 
@@ -421,17 +506,17 @@ jobs:
           html_lines.append(f'''
               <div id="rift" class="tab-content">
                   <div class="card">
-                      <h3>🌀 Rift</h3>
+                      <h3>🌀 Rift Progress</h3>
                       <div class="stat-row"><span>Motes</span><span>{fmt(rift_motes)}</span></div>
-                      <div class="stat-row"><span>Enigma Souls</span><span>{enigma_souls}</span></div>
-                      <div class="stat-row"><span>Gallery Trophies</span><span>{gallery_trophies}</span></div>
-                      <div class="stat-row"><span>Rift Visits</span><span>{rift_visits}</span></div>
+                      <div class="stat-row"><span>Enigma Souls</span><span>{enigma_souls}/52</span></div>
+                      <div class="stat-row"><span>Gallery Trophies</span><span>{gallery_trophies}/8</span></div>
+                      <div class="stat-row"><span>Visits</span><span>{rift_visits}</span></div>
                   </div>
               </div>''')
 
           # Pets Tab
-          html_lines.append('<div id="pets" class="tab-content"><div class="card"><h3>🐾 Top Pets</h3>')
-          for p in top_pets[:10]:
+          html_lines.append('<div id="pets" class="tab-content"><div class="card"><h3>🐾 Top 15 Pets</h3>')
+          for p in top_pets[:15]:
               pet_type = p.get('type', 'Unknown').replace('_', ' ').title()
               pet_exp = p.get('exp', 0)
               pet_level = int(pet_exp / 1e6) if pet_exp > 0 else 0
@@ -440,8 +525,8 @@ jobs:
           html_lines.append('</div></div>')
 
           # Collections Tab
-          html_lines.append('<div id="collections" class="tab-content"><div class="card"><h3>📦 Top Collections</h3>')
-          for item, amount in top_collections[:10]:
+          html_lines.append('<div id="collections" class="tab-content"><div class="card"><h3>📦 Top 30 Collections</h3>')
+          for item, amount in all_collections[:30]:
               item_name = item.replace('_', ' ').title()
               html_lines.append(f'<div class="stat-row"><span>{item_name}</span><span>{fmt(amount)}</span></div>')
           html_lines.append('</div></div>')
@@ -450,48 +535,85 @@ jobs:
           html_lines.append(f'''
               <div id="accessories" class="tab-content">
                   <div class="card">
-                      <h3>🔮 Accessories</h3>
+                      <h3>🔮 Accessory Bag</h3>
                       <div class="stat-row"><span>Magical Power</span><span>{mp}</span></div>
                       <div class="stat-row"><span>Selected Power</span><span>{selected_power}</span></div>
-                      <div class="stat-row"><span>Unlocked Powers</span><span>{', '.join(unlocked_powers[:5])}{'...' if len(unlocked_powers) > 5 else ''}</span></div>
+                      <div class="stat-row"><span>Bag Upgrades</span><span>{bag_upgrades}/34</span></div>
+                      <div class="stat-row"><span>Unlocked Powers</span><span>{', '.join(unlocked_powers[:8])}{'...' if len(unlocked_powers) > 8 else ''}</span></div>
                   </div>
               </div>''')
 
-          # Inventory Tab (Base64)
-          def trunc(s, max_len=200):
-              if not s:
-                  return '(empty)'
-              return s[:max_len] + ('...' if len(s) > max_len else '')
-
+          # Inventory Tab with GUI
           html_lines.append(f'''
               <div id="inventory" class="tab-content">
                   <div class="card">
-                      <h3>🎒 Inventory Data (Base64)</h3>
-                      <div class="inventory-data"><strong>inv_contents:</strong> {trunc(inv_contents)}</div>
-                      <div class="inventory-data"><strong>ender_chest:</strong> {trunc(ender_chest)}</div>
-                      <div class="inventory-data"><strong>armor:</strong> {trunc(armor)}</div>
-                      <div class="inventory-data"><strong>talisman_bag:</strong> {trunc(talisman_bag)}</div>
-                      <div class="inventory-data"><strong>quiver:</strong> {trunc(quiver)}</div>
-                      <div class="inventory-data"><strong>wardrobe:</strong> {trunc(wardrobe)}</div>
-                      <div class="inventory-data"><strong>sacks_bag:</strong> {trunc(sacks)}</div>
-                      <div class="inventory-data"><strong>potion_bag:</strong> {trunc(potion_bag)}</div>
-                      <div class="inventory-data"><strong>fishing_bag:</strong> {trunc(fishing_bag)}</div>
-                      <div class="inventory-data"><strong>personal_vault:</strong> {trunc(personal_vault)}</div>
-                      <div class="badge" style="margin-top:0.5rem;">🔐 Data is Base64‑encoded NBT. Use <a href="https://irath96.github.io/webNBT/" target="_blank">webNBT</a> to decode items.</div>
+                      <h3>🎒 Inventory (Main)</h3>
+                      <div id="inv-grid" class="inventory-grid"></div>
                   </div>
+                  <div class="card">
+                      <h3>📦 Ender Chest</h3>
+                      <div id="ender-grid" class="inventory-grid"></div>
+                  </div>
+                  <div class="card">
+                      <h3>🛡️ Armor</h3>
+                      <div id="armor-grid" class="inventory-grid" style="grid-template-columns: repeat(4, 1fr);"></div>
+                  </div>
+                  <div class="badge" style="margin-top:0.5rem;">🔐 Items are decoded from NBT. Hover for details.</div>
               </div>
               <footer>Generated from Hypixel API (v2) · Data as of {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</footer>
           </div>
           <script>
-              document.querySelectorAll('.tab-btn').forEach(btn => {{
-                  btn.addEventListener('click', () => {{
-                      const tabId = btn.getAttribute('data-tab');
-                      document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
-                      document.getElementById(tabId).classList.add('active');
-                      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-                      btn.classList.add('active');
-                  }});
-              }});
+              // NBT parsing and item rendering
+              const nbt = require('prismarine-nbt');
+
+              function decodeAndRender(base64Data, containerId, isArmor = false, rows = 5, cols = 9) {{
+                  if (!base64Data) {{
+                      document.getElementById(containerId).innerHTML = '<div class="stat-row">No data</div>';
+                      return;
+                  }}
+                  try {{
+                      const buffer = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+                      nbt.parse(buffer, (err, result) => {{
+                          if (err) {{
+                              console.error(err);
+                              document.getElementById(containerId).innerHTML = '<div class="stat-row">Failed to parse NBT</div>';
+                              return;
+                          }}
+                          const items = result.value.i.value || [];
+                          const grid = document.getElementById(containerId);
+                          grid.innerHTML = '';
+                          const maxSlots = rows * cols;
+                          for (let i = 0; i < maxSlots; i++) {{
+                              const item = items.find(slot => slot.Slot.value === i);
+                              const slotDiv = document.createElement('div');
+                              slotDiv.className = 'inventory-slot';
+                              if (item && item.id && item.id.value !== 0) {{
+                                  let itemName = item.id.value.replace('minecraft:', '').replace('_', ' ').toUpperCase();
+                                  let count = item.Count ? item.Count.value : 1;
+                                  slotDiv.innerHTML = `<div class="item-name">${{itemName}}</div><div class="item-count">${{count}}</div>`;
+                                  slotDiv.title = `${{itemName}} x${{count}}`;
+                              }} else {{
+                                  slotDiv.innerHTML = '<div class="item-name" style="opacity:0.3;">EMPTY</div>';
+                                  slotDiv.classList.add('slot-empty');
+                              }}
+                              grid.appendChild(slotDiv);
+                          }}
+                      }});
+                  }} catch(e) {{
+                      console.error(e);
+                      document.getElementById(containerId).innerHTML = '<div class="stat-row">Error decoding</div>';
+                  }}
+              }}
+
+              // Load inventory data
+              window.onload = () => {{
+                  const invData = `{inv_contents_b64}`;
+                  const enderData = `{ender_chest_b64}`;
+                  const armorData = `{armor_b64}`;
+                  if (invData) decodeAndRender(invData, 'inv-grid', false, 5, 9);
+                  if (enderData) decodeAndRender(enderData, 'ender-grid', false, 5, 9);
+                  if (armorData) decodeAndRender(armorData, 'armor-grid', true, 1, 4);
+              }};
           </script>
           </body>
           </html>''')
@@ -510,7 +632,7 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-      - name: Upload raw JSON (optional)
+      - name: Upload raw JSON
         uses: actions/upload-artifact@v4
         with:
           name: raw-json-files-${{ github.event.inputs.player_input }}
