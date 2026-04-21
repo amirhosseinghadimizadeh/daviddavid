@@ -1,0 +1,314 @@
+name: 📦 Generate Offline Telegram Report (Multi‑Channel)
+
+on:
+  workflow_dispatch:
+    inputs:
+      channels:
+        description: 'Channel usernames (comma‑separated, no @). Example: durov, channels, tgarchives'
+        required: true
+        default: 'durov'
+      limit:
+        description: 'Number of recent posts per channel (max 100)'
+        required: true
+        default: '50'
+        type: choice
+        options:
+          - '10'
+          - '20'
+          - '50'
+          - '100'
+
+jobs:
+  generate_offline_report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90   # allow up to 90 minutes for large media
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip
+          pip install requests
+
+      - name: Run multi‑channel scraper and build offline report
+        env:
+          CHANNELS_INPUT: ${{ github.event.inputs.channels }}
+          POST_LIMIT: ${{ github.event.inputs.limit }}
+        run: |
+          python3 << 'PYSCRIPT'
+          import os, requests, json, re, time, sys, hashlib
+          from pathlib import Path
+          from datetime import datetime
+          from urllib.parse import urlparse
+
+          # ---------- CONFIGURATION ----------
+          channels_raw = os.environ['CHANNELS_INPUT']
+          channels = [c.strip() for c in channels_raw.split(',') if c.strip()]
+          limit = int(os.environ['POST_LIMIT'])
+          MAX_MEDIA_SIZE_MB = 500
+          MAX_RETRIES = 5
+          API_MIRRORS = [
+              "https://tg.i-c-a.su",
+              "https://tg.a-g.su",
+              "https://telegram.rab.su",
+          ]
+
+          if not channels:
+              print("❌ No channels provided")
+              sys.exit(1)
+
+          print(f"Processing {len(channels)} channels: {channels}")
+          print(f"Post limit per channel: {limit}")
+
+          root_dir = Path("telegram_offline")
+          root_dir.mkdir(exist_ok=True)
+
+          headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+
+          # Global cache to avoid re-downloading same URL across channels
+          downloaded_urls = {}
+
+          def download_media(url, filepath):
+              """Download a file with progress dots, size limit, and retries. Returns bool."""
+              if url in downloaded_urls:
+                  # File already downloaded, just create a symlink or copy?
+                  # Since we are in the same run, we can reuse the existing file.
+                  existing = Path(downloaded_urls[url])
+                  if existing.exists():
+                      # Copy instead of symlink for ZIP portability
+                      import shutil
+                      shutil.copy2(existing, filepath)
+                      return True
+              # Check size first via HEAD request if possible
+              try:
+                  head = requests.head(url, headers=headers, timeout=10)
+                  size = int(head.headers.get('content-length', 0))
+                  if size > MAX_MEDIA_SIZE_MB * 1024 * 1024:
+                      print(f"    ⚠️ Skipping {url} – size {size//(1024*1024)} MB > {MAX_MEDIA_SIZE_MB} MB limit")
+                      return False
+              except:
+                  pass  # proceed anyway
+
+              for attempt in range(MAX_RETRIES):
+                  try:
+                      r = requests.get(url, headers=headers, timeout=60, stream=True)
+                      if r.status_code == 200:
+                          filepath.parent.mkdir(parents=True, exist_ok=True)
+                          downloaded = 0
+                          with open(filepath, 'wb') as f:
+                              for chunk in r.iter_content(chunk_size=8192):
+                                  f.write(chunk)
+                                  downloaded += len(chunk)
+                                  if downloaded % (10 * 1024 * 1024) < 8192:
+                                      print('.', end='', flush=True)
+                          print()  # newline after dots
+                          downloaded_urls[url] = str(filepath)
+                          return True
+                      else:
+                          print(f"    HTTP {r.status_code}")
+                  except Exception as e:
+                      print(f"    Attempt {attempt+1} failed: {e}")
+                      time.sleep(2 ** attempt)  # exponential backoff
+              return False
+
+          # ---------- Process each channel ----------
+          for channel in channels:
+              safe_channel = re.sub(r'[^a-zA-Z0-9_]', '_', channel)
+              print(f"\n📡 Processing @{channel} (folder: {safe_channel})")
+              channel_dir = root_dir / safe_channel
+              media_dir = channel_dir / "media"
+              channel_dir.mkdir(exist_ok=True)
+              media_dir.mkdir(exist_ok=True)
+
+              # Try multiple API mirrors
+              data = None
+              for mirror in API_MIRRORS:
+                  api_url = f"{mirror}/channel/@{channel}?limit={limit}"
+                  print(f"  Trying {mirror}...")
+                  try:
+                      resp = requests.get(api_url, headers=headers, timeout=30)
+                      if resp.status_code == 200:
+                          data = resp.json()
+                          print(f"  ✅ Success from {mirror}")
+                          break
+                  except:
+                      continue
+              if data is None:
+                  print(f"  ❌ Could not fetch @{channel} from any API mirror")
+                  continue
+
+              messages = data.get("messages", [])
+              if not messages:
+                  print(f"  ⚠️ No messages found")
+                  continue
+
+              print(f"  Retrieved {len(messages)} messages")
+
+              media_map = {}
+              for idx, msg in enumerate(messages):
+                  msg_id = msg.get('id', idx)
+                  media = msg.get('media')
+                  if not media:
+                      continue
+
+                  url = None
+                  ext = None
+                  if 'photo' in media:
+                      url = media['photo']
+                      ext = 'jpg'
+                  elif 'video' in media:
+                      url = media['video']
+                      ext = 'mp4'
+                  elif 'document' in media:
+                      doc = media['document']
+                      mime = doc.get('mime_type', '')
+                      if mime.startswith('image/'):
+                          url = doc.get('url')
+                          ext = 'jpg'
+                      elif mime.startswith('video/'):
+                          url = doc.get('url')
+                          ext = 'mp4'
+                      else:
+                          continue
+                  if url and ext:
+                      fname = f"{msg_id}.{ext}"
+                      filepath = media_dir / fname
+                      print(f"    Downloading {fname}...")
+                      if download_media(url, filepath):
+                          media_map[msg_id] = f"media/{fname}"
+                      else:
+                          print(f"    ❌ Failed to download {url}")
+                  time.sleep(0.2)
+
+              print(f"  Downloaded {len(media_map)} media files")
+
+              # Generate HTML report
+              html = f'''<!DOCTYPE html>
+              <html lang="en">
+              <head>
+                  <meta charset="UTF-8">
+                  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                  <title>@{channel} – Telegram Archive</title>
+                  <style>
+                      * {{ margin:0; padding:0; box-sizing:border-box; }}
+                      body {{
+                          background: #0e1621;
+                          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                          color: #e1e4e8;
+                          padding: 20px;
+                      }}
+                      .container {{ max-width: 800px; margin: 0 auto; }}
+                      .header {{
+                          background: #17212b;
+                          border-radius: 12px;
+                          padding: 20px;
+                          margin-bottom: 20px;
+                          position: sticky;
+                          top: 0;
+                          z-index: 10;
+                      }}
+                      .channel-title {{
+                          font-size: 1.4rem;
+                          font-weight: 600;
+                          display: flex;
+                          align-items: center;
+                          gap: 10px;
+                      }}
+                      .channel-username {{ color: #6ab3f3; font-size: 0.9rem; }}
+                      .post {{
+                          background: #17212b;
+                          border-radius: 12px;
+                          padding: 16px;
+                          margin-bottom: 10px;
+                      }}
+                      .post-date {{
+                          font-size: 0.75rem;
+                          color: #8e9eae;
+                          margin-bottom: 8px;
+                      }}
+                      .post-text {{
+                          margin-bottom: 12px;
+                          word-wrap: break-word;
+                      }}
+                      .post-text a {{
+                          color: #6ab3f3;
+                          text-decoration: none;
+                      }}
+                      .post-media {{
+                          margin-top: 12px;
+                      }}
+                      .post-media img, .post-media video {{
+                          max-width: 100%;
+                          max-height: 400px;
+                          border-radius: 8px;
+                          display: block;
+                      }}
+                      footer {{
+                          text-align: center;
+                          margin-top: 20px;
+                          font-size: 0.75rem;
+                          color: #5e6f8d;
+                      }}
+                  </style>
+              </head>
+              <body>
+              <div class="container">
+                  <div class="header">
+                      <div class="channel-title">📢 {data.get('name', channel)}</div>
+                      <div class="channel-username">@{channel}</div>
+                      {f'<div class="channel-about">{data["about"]}</div>' if data.get('about') else ''}
+                  </div>
+              '''
+
+              for msg in messages:
+                  date_ts = msg.get('date')
+                  if date_ts:
+                      date_str = datetime.fromtimestamp(date_ts).strftime('%Y-%m-%d %H:%M:%S')
+                  else:
+                      date_str = 'Unknown date'
+
+                  text = msg.get('text') or ''
+                  text = re.sub(r'(https?://[^\s]+)', r'<a href="\1" target="_blank" rel="noopener noreferrer">\1</a>', text)
+                  text = text or '<i>No text</i>'
+
+                  msg_id = msg.get('id')
+                  media_html = ''
+                  if msg_id in media_map:
+                      media_path = media_map[msg_id]
+                      if media_path.endswith('.mp4'):
+                          media_html = f'<video controls preload="metadata" src="{media_path}"></video>'
+                      else:
+                          media_html = f'<img src="{media_path}" loading="lazy">'
+
+                  html += f'''
+                  <div class="post">
+                      <div class="post-date">{date_str}</div>
+                      <div class="post-text">{text}</div>
+                      {f'<div class="post-media">{media_html}</div>' if media_html else ''}
+                  </div>
+                  '''
+
+              html += '''
+                  <footer>Generated offline archive. Media files are stored locally.</footer>
+              </div>
+              </body>
+              </html>
+              '''
+
+              with open(channel_dir / "index.html", "w", encoding="utf-8") as f:
+                  f.write(html)
+
+              print(f"  ✅ HTML report saved for @{channel}")
+
+          # Create final ZIP
+          print("\n📦 Creating ZIP archive...")
+          zip_name = "telegram_offline_report.zip"
+          os.system(f"cd telegram_offline && zip -r ../{zip_name} .")
+          print(f"✅ Done. ZIP saved as {zip_name}")
+          PYSCRIPT
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-offline-report
+          path: telegram_offline_report.zip
+          retention-days: 3
