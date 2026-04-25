@@ -1,0 +1,111 @@
+name: Download YouTube Video (Anti‑Bot Optimized)
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'YouTube Video or Playlist URL'
+        required: true
+        type: string
+      format:
+        description: 'Format'
+        required: false
+        default: 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+        type: choice
+        options:
+          - 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+          - 'best'
+          - 'bestaudio'
+      audio_only:
+        description: 'Extract audio only'
+        required: false
+        default: false
+        type: boolean
+      audio_format:
+        description: 'Audio format'
+        required: false
+        default: 'mp3'
+        type: choice
+        options: ['mp3', 'm4a', 'opus', 'aac', 'flac', 'wav']
+      subtitles:
+        description: 'Download subtitles'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create download directory
+        run: mkdir -p downloads
+
+      - name: Pull latest POT image
+        run: docker pull ghcr.io/jim60105/yt-dlp:pot
+
+      - name: Download with anti-bot measures
+        env:
+          VIDEO_URL: ${{ inputs.video_url }}
+          FORMAT: ${{ inputs.format }}
+          AUDIO_ONLY: ${{ inputs.audio_only }}
+          AUDIO_FORMAT: ${{ inputs.audio_format }}
+          SUBTITLES: ${{ inputs.subtitles }}
+        run: |
+          # Base command configuration
+          SHARED_OPTS="--output '/download/%(title)s.%(ext)s' \
+            --extractor-args 'youtube:player_client=android,web;skip=webpage,default_client' \
+            --user-agent 'Mozilla/5.0 (Linux; Android 13; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.6998.136 Mobile Safari/537.36' \
+            --sleep-interval 5 \
+            --max-sleep-interval 15 \
+            --sleep-requests 2 \
+            --limit-rate 2M \
+            --retries 10 \
+            --fragment-retries 10 \
+            --no-check-certificates \
+            --geo-bypass \
+            --no-call-home"
+
+          # Build the full docker command
+          DOCKER_CMD="docker run --rm -v $(pwd)/downloads:/download ghcr.io/jim60105/yt-dlp:pot $VIDEO_URL $SHARED_OPTS"
+
+          # Apply format/audio options
+          if [[ "$AUDIO_ONLY" == "true" ]]; then
+            DOCKER_CMD="$DOCKER_CMD -f bestaudio --extract-audio --audio-format $AUDIO_FORMAT --audio-quality 0"
+          else
+            DOCKER_CMD="$DOCKER_CMD -f '$FORMAT'"
+          fi
+
+          # Add subtitles if needed
+          if [[ "$SUBTITLES" == "true" ]]; then
+            DOCKER_CMD="$DOCKER_CMD --write-subs --sub-langs en --sub-format srt/ass/vtt --write-auto-subs"
+          fi
+
+          # Execute and retry if necessary
+          MAX_RETRIES=3
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i of $MAX_RETRIES..."
+            if eval $DOCKER_CMD; then
+              echo "Download succeeded!"
+              exit 0
+            else
+              echo "Attempt $i failed. Waiting before retrying..."
+              sleep 30
+            fi
+          done
+          echo "All attempts failed."
+          exit 1
+
+      - name: List downloaded files
+        run: ls -la downloads/
+
+      - name: Upload as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-content
+          path: downloads/
+          retention-days: 7
